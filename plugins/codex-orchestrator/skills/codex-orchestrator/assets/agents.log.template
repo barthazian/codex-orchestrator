@@ -200,6 +200,14 @@ sqlite3 .codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
 sqlite3 .codex/state.db "UPDATE mission SET progress='{progress}', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
 ```
 
+## Data Integrity Rules
+
+- **NEVER DELETE, DROP, or TRUNCATE tables** in state.db without explicit user approval
+- Old mission data (agents, events, checkpoints) is valuable context for future missions
+- Before reinitializing for a new mission, ALWAYS query existing data first to recover context
+- Only DELETE file_locks for a specific failed agent (to release its claims) — never bulk delete
+- The `CREATE TABLE IF NOT EXISTS` pattern preserves existing data across reinitializations
+
 ## What Stays as Files
 
 | File | Reason |

@@ -397,9 +397,52 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
 
 **Why this is conflict-free**: SQLite WAL mode allows concurrent reads with sequential writes. `busy_timeout=5000` queues writes if two hit simultaneously. Since writes are small (single INSERT/UPDATE) and infrequent, contention is near-zero.
 
+### Pre-Initialization: Context Recovery (MANDATORY)
+
+Before creating or reinitializing `.codex/state.db`, Claude MUST check for existing state and recover context. **NEVER skip this step.**
+
+**Step 1: Check if state.db exists**
+
+```bash
+test -f .codex/state.db && echo "EXISTS" || echo "NEW"
+```
+
+**Step 2: If it exists, read ALL context before doing anything else**
+
+```bash
+sqlite3 -header -column .codex/state.db "SELECT stage, mission, progress, summary FROM mission WHERE id=1;" 2>/dev/null
+sqlite3 -header -column .codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;" 2>/dev/null
+sqlite3 -header -column .codex/state.db "SELECT timestamp, type, source, message FROM events ORDER BY id DESC LIMIT 20;" 2>/dev/null
+```
+
+Use this context to understand:
+- What was previously built (agent tasks and files_modified)
+- What patterns were used (agent summaries)
+- What the current state of the project is
+- Whether the previous mission completed or was interrupted
+
+**Step 3: Archive, never delete**
+
+If starting a new mission with existing data:
+- Insert a boundary event marking the transition
+- The old data stays — it provides valuable context for future missions
+
+```bash
+sqlite3 .codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('info', 'claude', 'New mission starting. Previous mission archived in place.', (SELECT mission FROM mission WHERE id=1));" 2>/dev/null
+```
+
+### Destructive Action Policy
+
+**NEVER run DELETE, DROP, or TRUNCATE on any table in state.db.** The accumulated history is context, not clutter. Old mission data helps Claude understand:
+- What was already built (avoid duplicate work)
+- What files were modified (know what exists)
+- What failed previously (avoid repeating mistakes)
+
+If tables grow excessively large (>1000 rows in checkpoints/events), Claude may ask the user for permission to prune old entries — but NEVER autonomously.
+
 ### Initialization
 
-Claude initializes the database when starting a mission:
+Claude initializes the database when starting a mission (tables use IF NOT EXISTS — safe to run on existing databases):
 
 ```bash
 mkdir -p .codex/reviews
@@ -622,6 +665,13 @@ codex-agent health               # verify codex available
 
 - Review findings (Stage 6) can trigger loop back to Implementation (Stage 5).
 - Claude spawns fix agents for critical issues, then re-reviews.
+
+### Data Integrity
+
+- **NEVER run DELETE, DROP, or TRUNCATE on state.db tables** without explicit user approval.
+- Old mission data is context, not clutter. It helps avoid duplicate work and understand project history.
+- When an agent fails, only DELETE that agent's file_locks (to release claimed files) — never bulk delete.
+- If the database grows large, ask the user before pruning.
 
 ### SQL Escaping
 
