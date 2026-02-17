@@ -270,7 +270,7 @@ sequenceDiagram
 1. **Concurrent sessions**: Multiple `codex exec` instances may interfere with session restore (use `--ephemeral` if needed)
 2. **Fire-and-forget**: No mid-task messaging; agents must have self-contained tasks
 3. **JSONL buffering**: Output may buffer differently across platforms
-4. **Log files**: May contain ANSI terminal codes (use `--strip-ansi`)
+4. **Log files**: May contain ANSI terminal codes
 
 ## Navigation Guide
 

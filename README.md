@@ -34,7 +34,13 @@ Spawn parallel coding agents, monitor their progress, capture results via JSONL 
 
 Or say "set up codex orchestrator" and Claude will walk you through it.
 
-**Step 5:** Use it - just ask Claude to do things. The skill activates automatically for coding tasks.
+**Step 5:** Authenticate with OpenAI:
+
+```
+codex --login
+```
+
+**Step 6:** Use it - just ask Claude to do things. The skill activates automatically for coding tasks.
 
 ### Manual / CLI-Only Install
 
@@ -237,6 +243,26 @@ Multi-agent coordination happens through `.codex/state.db` in your project direc
 | `checkpoints` | Agent progress reports during work | Agents |
 
 The database uses WAL mode for concurrent access — unlimited readers, single writer, with `busy_timeout=5000`. This means Claude can read agent state while agents are actively writing checkpoints.
+
+### How Coordination Works
+
+```
+1. Claude creates .codex/state.db and writes the mission row
+2. Claude registers each agent in the agents table (status: pending)
+3. Claude spawns codex-agent processes via `codex-agent start`
+4. Each agent reads the mission table and its own agent row to learn its task
+5. Agent claims file locks (INSERT OR IGNORE) before modifying files
+6. Agent writes checkpoints as it progresses
+7. Agent marks itself completed and releases file locks
+8. Claude polls agent status via `codex-agent jobs --json` + SQLite queries
+9. Once all agents complete, Claude synthesizes results and advances the pipeline
+```
+
+Key rules:
+- **Agents never write to the `mission` table** — only Claude controls pipeline state
+- **Agents only UPDATE their own row** in the `agents` table — Claude does all INSERTs
+- **File locks use INSERT OR IGNORE** — if a file is already locked, the agent skips it
+- The database is created at mission start and persists until manually cleaned up (`rm -rf .codex/`)
 
 ### Dual-Model Code Review (Stage 6)
 

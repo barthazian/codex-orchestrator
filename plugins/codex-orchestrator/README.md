@@ -81,8 +81,8 @@ YOUR REQUEST
      |
      v
 [IDEATION] --> [RESEARCH] --> [SYNTHESIS] --> [PRD] --> [IMPLEMENTATION] --> [REVIEW] --> [TESTING]
-  Claude        Codex          Claude         Claude      Codex             Codex         Codex
-  + You         read-only                     + You       workspace-write   read-only     workspace-write
+  Claude        Codex          Claude         Claude      Codex             Dual-model    Codex
+  + You         read-only                     + You       workspace-write   Codex+Claude  workspace-write
 ```
 
 **Claude** handles strategic stages: ideation, synthesis, PRD creation.

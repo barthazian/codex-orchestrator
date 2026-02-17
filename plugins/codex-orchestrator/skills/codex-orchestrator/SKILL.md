@@ -408,7 +408,7 @@ PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS mission (id INTEGER PRIMARY KEY CHECK (id = 1), stage TEXT NOT NULL, mission TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, progress TEXT DEFAULT '', blockers TEXT DEFAULT '[]', next_steps TEXT DEFAULT '[]', summary TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')), sandbox TEXT DEFAULT 'workspace-write', started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), completed_at TEXT, files_modified TEXT DEFAULT '[]', summary TEXT DEFAULT '');
-CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), type TEXT NOT NULL CHECK (type IN ('course_correction', 'approval', 'abort', 'info', 'state_change', 'agent_spawn', 'agent_start', 'agent_complete', 'agent_fail')), source TEXT NOT NULL, message TEXT NOT NULL, context TEXT);
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), type TEXT NOT NULL CHECK (type IN ('course_correction', 'approval', 'abort', 'info', 'stage_change', 'agent_spawn', 'agent_start', 'agent_complete', 'agent_fail')), source TEXT NOT NULL, message TEXT NOT NULL, context TEXT);
 CREATE TABLE IF NOT EXISTS file_locks (file_path TEXT PRIMARY KEY, agent_id TEXT NOT NULL, locked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), FOREIGN KEY (agent_id) REFERENCES agents(id));
 CREATE TABLE IF NOT EXISTS checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), message TEXT NOT NULL, FOREIGN KEY (agent_id) REFERENCES agents(id));
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
@@ -609,7 +609,8 @@ codex-agent health               # verify codex available
 
 ### Timeout
 
-- Agent max runtime: **120 minutes**. Check progress at 90 minutes via `codex-agent capture <id>`.
+- CLI inactivity timeout: **60 minutes** (configurable in `src/config.ts`). Job auto-marked as failed if no JSONL activity.
+- Orchestration policy maximum: **120 minutes**. Check progress at 90 minutes via `codex-agent capture <id>`.
 - If unresponsive at 120 minutes: `codex-agent kill <id>`, mark failed, retry with adjusted prompt.
 
 ### Retry
