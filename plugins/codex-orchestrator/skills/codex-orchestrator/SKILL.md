@@ -164,6 +164,12 @@ The `--map` flag injects `docs/CODEBASE_MAP.md` into every agent's prompt, givin
 test -f docs/CODEBASE_MAP.md && echo "MAP EXISTS" || echo "NO MAP — run /cartographer first"
 ```
 
+**Cartographer fallback (if /cartographer returns empty):** If `/cartographer` produces no output or the map file is missing/empty after invocation, spawn a `general-purpose` agent (NOT Explore — Explore agents are read-only and cannot write files) with explicit instructions to:
+1. Read all source files in the project
+2. Write the analysis directly to `docs/CODEBASE_MAP.md`
+
+Explore agents return their analysis in-context, which can be lost during context handoff (especially with `run_in_background`). `general-purpose` agents can write files directly, ensuring the map is on disk regardless of context issues.
+
 **Auto-update after implementation:** After Stage 5 (Implementation) completes and passes the artifact gate, run `/cartographer` in update mode before advancing to Stage 6 (Review). Implementation agents change the codebase — review agents need the updated architecture to give accurate findings.
 
 **Why this matters:** A map costs minutes to generate. Without it, every agent wastes 5-10 minutes exploring. With 5 agents, that's 25-50 minutes of wasted compute per stage.
@@ -484,17 +490,23 @@ Every agent prompt MUST include the **Mission Context Header** below. This is NO
 
 ### The Template
 
-```bash
-codex-agent start "
+**CRITICAL: Use file-based prompts to avoid shell quoting issues.** The agent prompt contains sqlite3 commands with nested single quotes, double quotes, and JSON arrays. Passing this inline as `codex-agent start "..."` causes bash quoting failures. Instead:
+
+1. Write the prompt to `_codex/prompt-{agentId}.txt` using the Write tool
+2. Spawn with: `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files"`
+
+**Prompt file template** (write this to `_codex/prompt-{agentId}.txt`):
+
+```
 === MISSION CONTEXT (read before starting) ===
 
 Before you begin, run ALL of these commands to understand the current mission state:
 
-sqlite3 -header -column _codex/state.db \"SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;\"
-sqlite3 -header -column _codex/state.db \"SELECT id, task, status, files_modified FROM agents ORDER BY rowid;\"
-sqlite3 -header -column _codex/state.db \"SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id DESC LIMIT 10;\"
-sqlite3 -header -column _codex/state.db \"SELECT file_path, agent_id FROM file_locks;\"
-sqlite3 -header -column _codex/state.db \"SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 15;\"
+sqlite3 -header -column _codex/state.db "SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;"
+sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified FROM agents ORDER BY rowid;"
+sqlite3 -header -column _codex/state.db "SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id DESC LIMIT 10;"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 15;"
 
 Read the output carefully. Understand:
 1. What is the overall mission and what stage it is in
@@ -508,8 +520,8 @@ Do NOT modify files that are locked by other agents.
 
 Then mark yourself as running:
 
-sqlite3 _codex/state.db \"UPDATE agents SET status='running' WHERE id='[jobId]';\"
-sqlite3 _codex/state.db \"INSERT INTO events (type, source, message) VALUES ('agent_start', 'agent-[jobId]', 'Starting: [task summary]');\"
+sqlite3 _codex/state.db "UPDATE agents SET status='running' WHERE id='[jobId]';"
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_start', 'agent-[jobId]', 'Starting: [task summary]');"
 
 === YOUR TASK ===
 
@@ -531,8 +543,8 @@ CONSTRAINTS:
 
 Claim the files you will modify so other agents avoid them:
 
-sqlite3 _codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file1]', '[jobId]');\"
-sqlite3 _codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file2]', '[jobId]');\"
+sqlite3 _codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file1]', '[jobId]');"
+sqlite3 _codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file2]', '[jobId]');"
 
 (Run one INSERT per file you plan to modify. INSERT OR IGNORE means it will not fail if another agent already claimed it — in that case, do NOT modify that file.)
 
@@ -540,7 +552,7 @@ sqlite3 _codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id)
 
 After completing each significant step, write a checkpoint:
 
-sqlite3 _codex/state.db \"INSERT INTO checkpoints (agent_id, message) VALUES ('[jobId]', '[what you just finished]');\"
+sqlite3 _codex/state.db "INSERT INTO checkpoints (agent_id, message) VALUES ('[jobId]', '[what you just finished]');"
 
 Write a checkpoint after each file you create or major change you make.
 
@@ -550,19 +562,24 @@ IMPORTANT: If your summary contains single quotes, escape them by doubling: repl
 
 After completing your task, run ALL of these commands:
 
-sqlite3 _codex/state.db \"UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='[LIST_FILES_YOU_MODIFIED]', summary='[2-3 sentence summary of what you did]' WHERE id='[jobId]';\"
-sqlite3 _codex/state.db \"INSERT INTO events (type, source, message, context) VALUES ('agent_complete', 'agent-[jobId]', 'Completed: [one-line summary]', '[list key files modified]');\"
-sqlite3 _codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
+sqlite3 _codex/state.db "UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='[LIST_FILES_YOU_MODIFIED]', summary='[2-3 sentence summary of what you did]' WHERE id='[jobId]';"
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('agent_complete', 'agent-[jobId]', 'Completed: [one-line summary]', '[list key files modified]');"
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='[jobId]';"
 
-Replace [LIST_FILES_YOU_MODIFIED] with a JSON array (e.g. '[\"src/auth.ts\", \"src/types.ts\"]').
+Replace [LIST_FILES_YOU_MODIFIED] with a JSON array (e.g. '["src/auth.ts", "src/types.ts"]').
 The DELETE releases your file locks so subsequent agents can modify those files.
 
 If you FAIL or cannot complete the task, run instead:
 
-sqlite3 _codex/state.db \"UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[reason for failure]' WHERE id='[jobId]';\"
-sqlite3 _codex/state.db \"INSERT INTO events (type, source, message, context) VALUES ('agent_fail', 'agent-[jobId]', 'Failed: [reason]', '[error details]');\"
-sqlite3 _codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
-" --map -f "relevant/files/*.ts"
+sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[reason for failure]' WHERE id='[jobId]';"
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('agent_fail', 'agent-[jobId]', 'Failed: [reason]', '[error details]');"
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='[jobId]';"
+```
+
+**Spawning command** (after writing the prompt file):
+
+```bash
+codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files/*.ts"
 ```
 
 ### After Spawning
@@ -576,13 +593,14 @@ sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('age
 
 ### Template Rules (STRICT)
 
-1. **Every agent gets the full template.** All 5 sections: MISSION CONTEXT, YOUR TASK, BEFORE YOU START CODING, DURING YOUR WORK, WHEN YOU ARE DONE. No exceptions.
-2. **The sqlite3 commands are verbatim.** Do not paraphrase, simplify, or omit any query.
-3. **All 5 read queries in MISSION CONTEXT are mandatory.** Mission, agents, events, file_locks, checkpoints. All five, every time.
-4. **Claude fills in ONLY the bracketed parts** (`[Specific task description]`, `[cwd]`, `[list specific files]`, `[jobId]`, `[file1]`, `[file2]`). The rest is copy-paste.
-5. **For review agents**, omit BEFORE YOU START CODING (no file locks needed for source files), and append: `Write your findings to _codex/reviews/codex-{focus}.md in markdown format. Do NOT modify any source code files.` Do NOT use `-s read-only` — review agents need write access to `_codex/reviews/` and `_codex/state.db`.
-6. **For UI work**, include the production-grade UI line. For non-UI work, omit it.
-7. **File lock INSERTs** — Claude fills in the exact file paths. One INSERT per file.
+1. **ALWAYS use file-based prompts.** Write the prompt to `_codex/prompt-{agentId}.txt` using the Write tool, then spawn with `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" ...`. NEVER pass the template inline as a string argument — the nested sqlite3 quotes (single quotes inside double quotes inside shell arguments) cause bash parsing failures.
+2. **Every agent gets the full template.** All 5 sections: MISSION CONTEXT, YOUR TASK, BEFORE YOU START CODING, DURING YOUR WORK, WHEN YOU ARE DONE. No exceptions.
+3. **The sqlite3 commands are verbatim.** Do not paraphrase, simplify, or omit any query.
+4. **All 5 read queries in MISSION CONTEXT are mandatory.** Mission, agents, events, file_locks, checkpoints. All five, every time.
+5. **Claude fills in ONLY the bracketed parts** (`[Specific task description]`, `[cwd]`, `[list specific files]`, `[jobId]`, `[file1]`, `[file2]`). The rest is copy-paste.
+6. **For review agents**, omit BEFORE YOU START CODING (no file locks needed for source files), and append: `Write your findings to _codex/reviews/codex-{focus}.md in markdown format. Do NOT modify any source code files.` Do NOT use `-s read-only` — review agents need write access to `_codex/reviews/` and `_codex/state.db`.
+7. **For UI work**, include the production-grade UI line. For non-UI work, omit it.
+8. **File lock INSERTs** — Claude fills in the exact file paths. One INSERT per file.
 
 ## 7. CLI Reference & Monitoring
 
