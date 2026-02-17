@@ -1,5 +1,7 @@
 // Configuration for codex-agent
 
+import { homedir } from "os";
+
 export const config = {
   // Default model
   model: "gpt-5.3-codex",
@@ -13,7 +15,7 @@ export const config = {
   defaultSandbox: "workspace-write" as const,
 
   // Job storage directory
-  jobsDir: `${process.env.HOME}/.codex-agent/jobs`,
+  jobsDir: `${homedir()}/.codex-agent/jobs`,
 
   // Default inactivity timeout in minutes for running jobs
   defaultTimeout: 60,
@@ -21,8 +23,6 @@ export const config = {
   // Default number of jobs to show in listings
   jobsListLimit: 20,
 
-  // tmux session prefix
-  tmuxPrefix: "codex-agent",
 };
 
 export type ReasoningEffort = typeof config.reasoningEfforts[number];

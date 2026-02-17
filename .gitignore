@@ -9,6 +9,7 @@ dist/
 
 # OS files
 .DS_Store
+Thumbs.db
 
 # Editor
 .vscode/
@@ -16,5 +17,8 @@ dist/
 *.swp
 *.swo
 
-# Bun
+# Bun (binary lockfile — text bun.lock IS committed)
 bun.lockb
+
+# Project-level orchestration state (created in user projects, not this repo)
+.codex/

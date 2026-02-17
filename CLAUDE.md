@@ -1,10 +1,10 @@
 # Codex Orchestrator
 
-CLI tool for delegating tasks to GPT Codex agents via tmux sessions. Designed for Claude Code orchestration with bidirectional communication.
+CLI tool for delegating tasks to GPT Codex agents via `codex exec --json`. Designed for Claude Code orchestration.
 
-**Stack**: TypeScript, Bun, tmux, OpenAI Codex CLI
+**Stack**: TypeScript, Bun, OpenAI Codex CLI
 
-**Structure**: Shell wrapper -> CLI entry point -> Job management -> tmux sessions
+**Structure**: Shell wrapper -> CLI entry point -> Job management -> codex exec --json processes
 
 For detailed architecture, see [docs/CODEBASE_MAP.md](docs/CODEBASE_MAP.md).
 
@@ -27,10 +27,9 @@ bun run src/cli.ts health
 |------|---------|
 | `src/cli.ts` | CLI commands and argument parsing |
 | `src/jobs.ts` | Job lifecycle and persistence |
-| `src/tmux.ts` | tmux session management |
+| `src/exec.ts` | codex exec --json process management |
 | `src/config.ts` | Configuration constants |
 | `src/files.ts` | File loading for context injection |
-| `src/session-parser.ts` | Parse Codex session files for metadata |
 | `plugins/` | Claude Code plugin (marketplace structure) |
 
 ## Plugin Structure
@@ -48,12 +47,14 @@ plugins/codex-orchestrator/         # the plugin
 
 ## Dependencies
 
-- **Runtime**: Bun, tmux, codex CLI
+- **Runtime**: Bun, codex CLI
 - **NPM**: glob (file matching)
 
 ## Notes
 
 - Jobs stored in `~/.codex-agent/jobs/`
-- Uses `script` command for output logging
-- Completion detected via marker string in output
+- Each agent runs as a detached `codex exec --json` process
+- JSONL output captured to `<jobId>.jsonl` for event parsing
+- Completion detected via JSONL events or process exit
 - Bun is the TypeScript runtime - never use npm/yarn/pnpm for running
+- Cross-platform: macOS, Linux, Windows (MINGW/Git Bash)

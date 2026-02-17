@@ -1,6 +1,6 @@
 # Codex Orchestrator - Claude Code Plugin
 
-A Claude Code plugin that lets Claude orchestrate OpenAI Codex agents. Claude handles strategy and synthesis while Codex agents handle deep coding work in parallel tmux sessions.
+A Claude Code plugin that lets Claude orchestrate OpenAI Codex agents. Claude handles strategy and synthesis while Codex agents handle deep coding work via `codex exec --json` background processes.
 
 ## What It Does
 
@@ -8,7 +8,6 @@ When installed, Claude gains the ability to:
 
 - **Spawn Codex agents** for research, implementation, review, and testing
 - **Monitor agent progress** via structured JSON output
-- **Redirect agents mid-task** when they need course correction
 - **Synthesize findings** from multiple parallel agents into clear results
 - **Follow a structured pipeline**: Ideation -> Research -> Synthesis -> PRD -> Implementation -> Review -> Testing
 
@@ -19,7 +18,7 @@ You describe what you want. Claude breaks it into tasks, delegates to Codex agen
 ### Via Marketplace
 
 ```
-/plugin marketplace add kingbootoshi/codex-orchestrator
+/plugin marketplace add barthazian/codex-orchestrator
 /plugin install codex-orchestrator
 ```
 
@@ -28,7 +27,7 @@ You describe what you want. Claude breaks it into tasks, delegates to Codex agen
 Clone and install:
 
 ```bash
-git clone https://github.com/kingbootoshi/codex-orchestrator.git ~/.codex-orchestrator
+git clone https://github.com/barthazian/codex-orchestrator.git ~/.codex-orchestrator
 cd ~/.codex-orchestrator && bun install
 export PATH="$HOME/.codex-orchestrator/bin:$PATH"  # add to ~/.bashrc or ~/.zshrc
 ```
@@ -38,10 +37,6 @@ export PATH="$HOME/.codex-orchestrator/bin:$PATH"  # add to ~/.bashrc or ~/.zshr
 The `codex-agent` CLI and its dependencies must be installed:
 
 ```bash
-# Install tmux
-brew install tmux                  # macOS
-# sudo apt-get install -y tmux    # Ubuntu/Debian
-
 # Install Bun
 curl -fsSL https://bun.sh/install | bash
 
@@ -52,7 +47,7 @@ npm install -g @openai/codex
 codex --login
 
 # Install codex-orchestrator CLI
-git clone https://github.com/kingbootoshi/codex-orchestrator.git ~/.codex-orchestrator
+git clone https://github.com/barthazian/codex-orchestrator.git ~/.codex-orchestrator
 cd ~/.codex-orchestrator && bun install
 export PATH="$HOME/.codex-orchestrator/bin:$PATH"  # add to ~/.bashrc or ~/.zshrc
 ```
@@ -111,7 +106,7 @@ The plugin uses the `codex-agent` CLI under the hood:
 codex-agent start "task" -r high --map -s read-only   # spawn
 codex-agent jobs --json                                # monitor
 codex-agent capture <id>                               # check output
-codex-agent send <id> "new instructions"               # redirect
+codex-agent events <id>                                # view JSONL events
 codex-agent kill <id>                                  # stop (last resort)
 ```
 

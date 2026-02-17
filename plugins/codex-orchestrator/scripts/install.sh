@@ -2,6 +2,7 @@
 # Codex Orchestrator - Installation Script
 # Installs the codex-agent CLI and its dependencies.
 # Uses only official package managers. No third-party scripts.
+# Cross-platform: macOS, Linux, Windows (MINGW/Git Bash)
 
 set -e
 
@@ -12,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 INSTALL_DIR="${CODEX_ORCHESTRATOR_HOME:-$HOME/.codex-orchestrator}"
-REPO_URL="https://github.com/kingbootoshi/codex-orchestrator.git"
+REPO_URL="https://github.com/barthazian/codex-orchestrator.git"
 
 info() { echo -e "${BLUE}[info]${NC} $1"; }
 success() { echo -e "${GREEN}[ok]${NC} $1"; }
@@ -27,13 +28,7 @@ detect_platform() {
     Linux*)   PLATFORM="linux" ;;
     Darwin*)  PLATFORM="macos" ;;
     CYGWIN*|MINGW*|MSYS*)
-      error "Windows is not directly supported."
-      echo ""
-      echo "Please use WSL (Windows Subsystem for Linux):"
-      echo "  1. Install WSL: wsl --install"
-      echo "  2. Open a WSL terminal"
-      echo "  3. Re-run this script inside WSL"
-      exit 1
+      PLATFORM="windows"
       ;;
     *)
       error "Unsupported platform: $(uname -s)"
@@ -66,48 +61,6 @@ detect_linux_pkg_manager() {
 }
 
 # -------------------------------------------------------------------
-# Check and install tmux
-# -------------------------------------------------------------------
-check_tmux() {
-  if command -v tmux &>/dev/null; then
-    success "tmux: $(tmux -V)"
-    return 0
-  fi
-
-  warn "tmux not found. Installing..."
-
-  if [ "$PLATFORM" = "macos" ]; then
-    if ! command -v brew &>/dev/null; then
-      error "Homebrew not found. Install it from https://brew.sh then re-run this script."
-      exit 1
-    fi
-    brew install tmux
-  elif [ "$PLATFORM" = "linux" ]; then
-    detect_linux_pkg_manager
-    case "$PKG_MANAGER" in
-      apt)     sudo apt-get update && sudo apt-get install -y tmux ;;
-      dnf)     sudo dnf install -y tmux ;;
-      yum)     sudo yum install -y tmux ;;
-      pacman)  sudo pacman -S --noconfirm tmux ;;
-      apk)     sudo apk add tmux ;;
-      zypper)  sudo zypper install -y tmux ;;
-      *)
-        error "No supported package manager found. Install tmux manually:"
-        echo "  https://github.com/tmux/tmux/wiki/Installing"
-        exit 1
-        ;;
-    esac
-  fi
-
-  if command -v tmux &>/dev/null; then
-    success "tmux installed: $(tmux -V)"
-  else
-    error "tmux installation failed."
-    exit 1
-  fi
-}
-
-# -------------------------------------------------------------------
 # Check and install Bun
 # -------------------------------------------------------------------
 check_bun() {
@@ -133,6 +86,52 @@ check_bun() {
   else
     error "Bun installation failed. Install manually from https://bun.sh"
     exit 1
+  fi
+}
+
+# -------------------------------------------------------------------
+# Check and install sqlite3
+# -------------------------------------------------------------------
+check_sqlite() {
+  if command -v sqlite3 &>/dev/null; then
+    success "sqlite3: $(sqlite3 --version | cut -d' ' -f1)"
+    return 0
+  fi
+
+  warn "sqlite3 not found. Installing..."
+
+  if [ "$PLATFORM" = "macos" ]; then
+    # sqlite3 ships with macOS, but just in case:
+    if command -v brew &>/dev/null; then
+      brew install sqlite
+    else
+      warn "sqlite3 not found and Homebrew not available. Install sqlite3 manually."
+      return 1
+    fi
+  elif [ "$PLATFORM" = "linux" ]; then
+    detect_linux_pkg_manager
+    case "$PKG_MANAGER" in
+      apt)    sudo apt-get update && sudo apt-get install -y sqlite3 ;;
+      dnf)    sudo dnf install -y sqlite ;;
+      yum)    sudo yum install -y sqlite ;;
+      pacman) sudo pacman -S --noconfirm sqlite ;;
+      apk)    sudo apk add sqlite ;;
+      zypper) sudo zypper install -y sqlite3 ;;
+      *)      error "Install sqlite3 manually"; return 1 ;;
+    esac
+  elif [ "$PLATFORM" = "windows" ]; then
+    if command -v winget &>/dev/null; then
+      winget install SQLite.SQLite --accept-package-agreements --accept-source-agreements
+    else
+      warn "winget not available. Install sqlite3 manually from https://www.sqlite.org/download.html"
+      return 1
+    fi
+  fi
+
+  if command -v sqlite3 &>/dev/null; then
+    success "sqlite3 installed: $(sqlite3 --version | cut -d' ' -f1)"
+  else
+    warn "sqlite3 installation may require a shell restart to appear on PATH."
   fi
 }
 
@@ -259,7 +258,7 @@ verify() {
   echo "Quick start:"
   echo "  codex-agent start \"Review this codebase for issues\" --map"
   echo "  codex-agent jobs --json"
-  echo "  codex-agent capture <jobId>"
+  echo "  codex-agent events <jobId>"
   echo ""
 
   if ! command -v codex &>/dev/null; then
@@ -282,8 +281,8 @@ main() {
   detect_platform
   echo ""
 
-  check_tmux
   check_bun
+  check_sqlite
   check_codex
 
   echo ""

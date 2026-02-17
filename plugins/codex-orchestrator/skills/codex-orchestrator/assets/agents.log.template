@@ -1,72 +1,208 @@
-# Agents Log
+# .codex/state.db — SQLite State Bus Schema
 
-## Session: [TIMESTAMP]
-Goal: [What we're trying to accomplish]
-PRD: [Path to PRD if exists, or "TBD"]
-Stage: [ideation | research | synthesis | prd | implementation | review | testing]
+The `.codex/state.db` file is the shared state bus between Claude and Codex agents. Claude initializes it, agents read/write their own state, and all coordination happens through SQL queries.
 
----
+## WAL Mode
 
-### Spawned: [jobId] - [time]
-Type: [research | implementation | review | testing]
-Prompt: [The prompt sent to the agent]
-Reasoning: [low | medium | high | xhigh]
-Sandbox: [read-only | workspace-write]
-Context: [Any relevant files included with -f]
+The database uses WAL (Write-Ahead Logging) mode, which allows:
+- **Unlimited concurrent readers** — Claude can read state while agents write
+- **Single writer** — Only one process writes at a time (SQLite handles locking)
+- **busy_timeout=5000** — Waits up to 5 seconds if the database is locked
 
-### Complete: [jobId] - [time]
-Status: [success | failed | partial]
-Findings:
-- [Key finding 1]
-- [Key finding 2]
-Files: [Relevant files identified or modified]
-Recommendations: [If any]
+## Full Schema
 
-### Synthesis - [time]
-Combined understanding:
-[Summary of combined findings from multiple agents]
+```sql
+PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=5000;
 
-Signal (keep):
-- [Valuable insight 1]
-- [Valuable insight 2]
+-- Mission state (singleton row)
+CREATE TABLE IF NOT EXISTS mission (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  stage TEXT NOT NULL,
+  mission TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  progress TEXT DEFAULT '',
+  blockers TEXT DEFAULT '[]',
+  next_steps TEXT DEFAULT '[]',
+  summary TEXT DEFAULT ''
+);
 
-Noise (discard):
-- [Over-engineered suggestion]
-- [Misunderstood context]
+-- Agents registry
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+  sandbox TEXT DEFAULT 'workspace-write',
+  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  completed_at TEXT,
+  files_modified TEXT DEFAULT '[]',
+  summary TEXT DEFAULT ''
+);
 
-Approach:
-1. [Step 1]
-2. [Step 2]
+-- Event history
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  type TEXT NOT NULL CHECK (type IN (
+    'course_correction', 'approval', 'abort', 'info',
+    'stage_change', 'agent_spawn', 'agent_start', 'agent_complete', 'agent_fail'
+  )),
+  source TEXT NOT NULL,
+  message TEXT NOT NULL,
+  context TEXT
+);
 
-Next: [What to do next]
+-- File locks (prevents concurrent modification)
+CREATE TABLE IF NOT EXISTS file_locks (
+  file_path TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  locked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
 
-### PRD Created - [time]
-Path: docs/prds/[name].md
-Status: [draft | ready for review | approved]
+-- Agent progress checkpoints
+CREATE TABLE IF NOT EXISTS checkpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  message TEXT NOT NULL,
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
 
-### Implementation Started - [time]
-Agent: [jobId]
-PRD: [path]
-Phase: [1 | 2 | etc]
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
+```
 
-### Review Complete - [time]
-Agent: [jobId]
-Type: [security | quality | simplification]
-Result: [passed | failed with issues]
-Issues:
-- [Issue 1 if any]
+## Table Descriptions
 
-### Testing Complete - [time]
-Agent: [jobId]
-Result: [all passing | X failures]
-Coverage: [if applicable]
+### `mission` — Singleton orchestration state
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER | Always 1 (singleton row) |
+| stage | TEXT | Current pipeline stage |
+| mission | TEXT | Human-readable mission description |
+| started_at | TEXT | ISO 8601 timestamp when mission started |
+| updated_at | TEXT | ISO 8601 timestamp of last state update |
+| progress | TEXT | Human-readable progress summary |
+| blockers | TEXT | JSON array of current blockers |
+| next_steps | TEXT | JSON array of next steps |
+| summary | TEXT | Final mission summary |
 
----
+### `agents` — Agent registry
+| Column | Type | Description |
+|--------|------|-------------|
+| id | TEXT | codex-agent job ID (primary key) |
+| task | TEXT | Description of assigned task |
+| status | TEXT | pending, running, completed, or failed |
+| sandbox | TEXT | read-only or workspace-write |
+| started_at | TEXT | ISO 8601 timestamp (auto-set) |
+| completed_at | TEXT | ISO 8601 timestamp when finished (null if running) |
+| files_modified | TEXT | JSON array of modified file paths |
+| summary | TEXT | Agent's completion summary |
 
-## Context for Next Session
+### `events` — Event history
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER | Auto-increment primary key |
+| timestamp | TEXT | ISO 8601 timestamp (auto-set) |
+| type | TEXT | Event type (see below) |
+| source | TEXT | Who created the event (claude, agent-{id}) |
+| message | TEXT | Event message |
+| context | TEXT | Additional context (optional) |
 
-Current stage: [Where we are in the pipeline]
-Running agents: [List job IDs and their purpose]
-Pending work: [What needs to happen next]
-Blockers: [Anything blocking progress]
-Last action: [What was just completed]
+**Event types:** stage_change, agent_spawn, agent_start, agent_complete, agent_fail, course_correction, approval, abort, info
+
+### `file_locks` — Concurrent file modification prevention
+| Column | Type | Description |
+|--------|------|-------------|
+| file_path | TEXT | Absolute or relative file path (primary key) |
+| agent_id | TEXT | Foreign key to agents.id |
+| locked_at | TEXT | ISO 8601 timestamp (auto-set) |
+
+### `checkpoints` — Agent progress reports
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER | Auto-increment primary key |
+| agent_id | TEXT | Foreign key to agents.id |
+| timestamp | TEXT | ISO 8601 timestamp (auto-set) |
+| message | TEXT | Progress update message |
+
+## Write Ownership
+
+| Table | Writer | Reader |
+|-------|--------|--------|
+| `mission` | Claude only | Claude, Codex agents |
+| `agents` (INSERT) | Claude only | Claude, Codex agents |
+| `agents` (UPDATE own row) | Each agent by ID | Claude, Codex agents |
+| `events` | Claude (source='claude'), Agents (source='agent-{id}') | Claude, Codex agents |
+| `file_locks` | Codex agents (claim on start, release on finish) | Claude, Codex agents |
+| `checkpoints` | Codex agents (progress updates during work) | Claude, Codex agents |
+
+## Common Query Patterns
+
+### Read mission state
+```bash
+sqlite3 -header -column .codex/state.db "SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;"
+```
+
+### Read all agent statuses
+```bash
+sqlite3 -header -column .codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
+```
+
+### Read running agents only
+```bash
+sqlite3 -header -column .codex/state.db "SELECT id, task, started_at FROM agents WHERE status IN ('pending','running');"
+```
+
+### Read recent checkpoints
+```bash
+sqlite3 -header -column .codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
+```
+
+### Read Claude decisions
+```bash
+sqlite3 -header -column .codex/state.db "SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id;"
+```
+
+### Check file locks
+```bash
+sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+```
+
+### Register a new agent
+```bash
+sqlite3 .codex/state.db "INSERT INTO agents (id, task, sandbox) VALUES ('{id}', '{task}', '{sandbox}');"
+```
+
+### Claim a file lock
+```bash
+sqlite3 .codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('{path}', '{id}');"
+```
+
+### Write a checkpoint
+```bash
+sqlite3 .codex/state.db "INSERT INTO checkpoints (agent_id, message) VALUES ('{id}', '{progress message}');"
+```
+
+### Mark agent complete
+```bash
+sqlite3 .codex/state.db "UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='{json_array}', summary='{summary}' WHERE id='{id}';"
+sqlite3 .codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
+```
+
+### Update mission progress
+```bash
+sqlite3 .codex/state.db "UPDATE mission SET progress='{progress}', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
+```
+
+## What Stays as Files
+
+| File | Reason |
+|------|--------|
+| `.codex/reviews/codex-*.md` | Freeform markdown documents, agents write directly |
+| `.codex/reviews/synthesis.md` | Freeform markdown document, Claude writes |
