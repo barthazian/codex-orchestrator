@@ -208,12 +208,43 @@ When installed as a Claude Code plugin, the **codex-orchestrator skill** teaches
 
 - Breaks your requests into agent-sized tasks
 - Spawns agents with the right flags (read-only for research, workspace-write for implementation)
-- Monitors agent progress
+- Monitors agent progress via JSONL events and SQLite state
 - Synthesizes findings from multiple agents
+- Runs dual-model code review (Codex agents + Claude Sonnet reviewers)
 
 This means you can just describe what you want, and Claude handles the delegation.
 
-The skill follows a pipeline: **Ideation -> Research -> Synthesis -> PRD -> Implementation -> Review -> Testing**. Each stage uses the appropriate agent configuration.
+The skill follows a 7-stage pipeline: **Ideation -> Research -> Synthesis -> PRD -> Implementation -> Review -> Testing**. Each stage uses the appropriate agent configuration.
+
+### SQLite State Bus
+
+Multi-agent coordination happens through `.codex/state.db` in your project directory. Claude initializes it, agents read/write their own state, and all coordination happens through SQL.
+
+```
+.codex/
+├── state.db              # SQLite database (WAL mode)
+└── reviews/              # Code review markdown files
+```
+
+**5 tables** manage the orchestration:
+
+| Table | Purpose | Writer |
+|-------|---------|--------|
+| `mission` | Pipeline stage, progress, blockers | Claude only |
+| `agents` | Agent registry (task, status, files modified) | Claude (INSERT), each agent (UPDATE own row) |
+| `events` | Event history (stage changes, agent lifecycle) | Claude + agents |
+| `file_locks` | Prevents concurrent file modification | Agents (claim/release) |
+| `checkpoints` | Agent progress reports during work | Agents |
+
+The database uses WAL mode for concurrent access — unlimited readers, single writer, with `busy_timeout=5000`. This means Claude can read agent state while agents are actively writing checkpoints.
+
+### Dual-Model Code Review (Stage 6)
+
+The review pipeline uses both Codex and Claude models:
+
+1. **Codex review agents** — Spawn focused reviewers for security, correctness, performance
+2. **Claude Sonnet agents** — 5 parallel reviewers with different specializations
+3. **Haiku confidence scoring** — Aggregates findings at confidence threshold 80
 
 See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md) for full plugin documentation.
 
@@ -231,7 +262,6 @@ See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md)
 ## Tips
 
 - Use `jobs --json` to get structured data (tokens, files, summary) in one call
-- Use `--strip-ansi` when capturing output programmatically
 - Use `-r xhigh` for complex tasks that need deep reasoning
 - Use `--map` to give agents codebase context (requires docs/CODEBASE_MAP.md)
 - Use `-s read-only` for research tasks that shouldn't modify files
