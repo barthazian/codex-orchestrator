@@ -154,6 +154,20 @@ USER'S REQUEST
 | Implementation done, "review" | REVIEW | DUAL-MODEL: Codex + Claude review agents |
 | "test", "verify", review passed | TESTING | Spawn workspace-write Codex agents |
 
+### Codebase Map (Auto-Managed)
+
+The `--map` flag injects `docs/CODEBASE_MAP.md` into every agent's prompt, giving them instant architectural context. Without it, agents waste time exploring and guessing at structure.
+
+**Auto-create at mission start:** Before entering any pipeline stage, check if `docs/CODEBASE_MAP.md` exists. If it does NOT exist, invoke `/cartographer` to generate it. This is a prerequisite — do NOT spawn agents without a map.
+
+```bash
+test -f docs/CODEBASE_MAP.md && echo "MAP EXISTS" || echo "NO MAP — run /cartographer first"
+```
+
+**Auto-update after implementation:** After Stage 5 (Implementation) completes and passes the artifact gate, run `/cartographer` in update mode before advancing to Stage 6 (Review). Implementation agents change the codebase — review agents need the updated architecture to give accurate findings.
+
+**Why this matters:** A map costs minutes to generate. Without it, every agent wastes 5-10 minutes exploring. With 5 agents, that's 25-50 minutes of wasted compute per stage.
+
 ### Stage 1: Ideation (Claude + User)
 
 Talk through the problem with the user. Understand what they want. Plan how to decompose the work into agent-sized tasks. Even seemingly simple tasks go to Codex agents — you are the orchestrator, not the implementer.
@@ -224,6 +238,8 @@ sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_lo
 ```
 
 If any agents are still running or file locks remain, do NOT advance to review.
+
+**Map Update Gate (after artifact gate passes):** Run `/cartographer` to update the codebase map before review. Implementation agents changed the codebase — review agents need current architecture context.
 
 ### Stage 6: Review (DUAL-MODEL) — Complete Protocol
 
