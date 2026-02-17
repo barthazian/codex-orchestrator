@@ -1,6 +1,6 @@
-# .codex/state.db — SQLite State Bus Schema
+# _codex/state.db — SQLite State Bus Schema
 
-The `.codex/state.db` file is the shared state bus between Claude and Codex agents. Claude initializes it, agents read/write their own state, and all coordination happens through SQL queries.
+The `_codex/state.db` file is the shared state bus between Claude and Codex agents. Claude initializes it, agents read/write their own state, and all coordination happens through SQL queries.
 
 ## WAL Mode
 
@@ -146,58 +146,58 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
 
 ### Read mission state
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;"
+sqlite3 -header -column _codex/state.db "SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;"
 ```
 
 ### Read all agent statuses
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
+sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
 ```
 
 ### Read running agents only
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT id, task, started_at FROM agents WHERE status IN ('pending','running');"
+sqlite3 -header -column _codex/state.db "SELECT id, task, started_at FROM agents WHERE status IN ('pending','running');"
 ```
 
 ### Read recent checkpoints
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
+sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
 ```
 
 ### Read Claude decisions
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id;"
+sqlite3 -header -column _codex/state.db "SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id;"
 ```
 
 ### Check file locks
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
 ```
 
 ### Register a new agent
 ```bash
-sqlite3 .codex/state.db "INSERT INTO agents (id, task, sandbox) VALUES ('{id}', '{task}', '{sandbox}');"
+sqlite3 _codex/state.db "INSERT INTO agents (id, task, sandbox) VALUES ('{id}', '{task}', '{sandbox}');"
 ```
 
 ### Claim a file lock
 ```bash
-sqlite3 .codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('{path}', '{id}');"
+sqlite3 _codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('{path}', '{id}');"
 ```
 
 ### Write a checkpoint
 ```bash
-sqlite3 .codex/state.db "INSERT INTO checkpoints (agent_id, message) VALUES ('{id}', '{progress message}');"
+sqlite3 _codex/state.db "INSERT INTO checkpoints (agent_id, message) VALUES ('{id}', '{progress message}');"
 ```
 
 ### Mark agent complete
 ```bash
-sqlite3 .codex/state.db "UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='{json_array}', summary='{summary}' WHERE id='{id}';"
-sqlite3 .codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
+sqlite3 _codex/state.db "UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='{json_array}', summary='{summary}' WHERE id='{id}';"
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
 ```
 
 ### Update mission progress
 ```bash
-sqlite3 .codex/state.db "UPDATE mission SET progress='{progress}', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
+sqlite3 _codex/state.db "UPDATE mission SET progress='{progress}', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
 ```
 
 ## Data Integrity Rules
@@ -212,5 +212,5 @@ sqlite3 .codex/state.db "UPDATE mission SET progress='{progress}', updated_at=st
 
 | File | Reason |
 |------|--------|
-| `.codex/reviews/codex-*.md` | Freeform markdown documents, agents write directly |
-| `.codex/reviews/synthesis.md` | Freeform markdown document, Claude writes |
+| `_codex/reviews/codex-*.md` | Freeform markdown documents, agents write directly |
+| `_codex/reviews/synthesis.md` | Freeform markdown document, Claude writes |

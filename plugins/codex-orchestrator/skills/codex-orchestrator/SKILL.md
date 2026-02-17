@@ -1,6 +1,6 @@
 ---
 name: codex-orchestrator
-description: Army model — Claude decomposes tasks and spawns N focused Codex agents directly via codex exec --json. No single-lead bottleneck. Claude manages all coordination via .codex/state.db, makes strategic decisions, and orchestrates dual-model code reviews. Cross-platform (macOS, Linux, Windows). Trigger on ANY task involving code, file modifications, codebase research, multi-step work, or implementation. Only skip if the user explicitly asks you to do something yourself.
+description: Army model — Claude decomposes tasks and spawns N focused Codex agents directly via codex exec --json. No single-lead bottleneck. Claude manages all coordination via _codex/state.db, makes strategic decisions, and orchestrates dual-model code reviews. Cross-platform (macOS, Linux, Windows). Trigger on ANY task involving code, file modifications, codebase research, multi-step work, or implementation. Only skip if the user explicitly asks you to do something yourself.
 triggers:
   - codex-orchestrator
   - spawn codex
@@ -31,7 +31,7 @@ CLAUDE (Opus) — strategy, decomposition, coordination, review orchestration
 Two roles:
 
 - **User**: Vision, strategic decisions, plan approval.
-- **Claude**: Strategy, task decomposition, PRD creation, agent spawning, coordination via `.codex/state.db`, synthesis, dual-model review orchestration.
+- **Claude**: Strategy, task decomposition, PRD creation, agent spawning, coordination via `_codex/state.db`, synthesis, dual-model review orchestration.
 
 Claude decomposes tasks and spawns up to 5 focused Codex agents in parallel. Each agent receives a single, self-contained task. Agents are fire-and-forget coders — they execute their task and exit. Claude handles all coordination.
 
@@ -48,7 +48,7 @@ Claude breaks work into focused, independent tasks and spawns a Codex agent for 
 - Write PRDs and specs
 - Decompose tasks into agent-sized work units
 - Spawn Codex agents (up to 5 concurrent)
-- Initialize and manage `.codex/state.db`
+- Initialize and manage `_codex/state.db`
 - Register agents in the `agents` table (status `pending`)
 - Monitor agent completion via `codex-agent jobs --json` and SQLite queries
 - Make course corrections via `events` table
@@ -174,7 +174,7 @@ Talk through the problem with the user. Understand what they want. Plan how to d
 
 ### Stage 2: Research (Claude spawns workspace-write agents, read-only behavior)
 
-Decompose the research into focused questions. Spawn a Codex agent for each question/area. Use `-s workspace-write` (the default) — the prompt constrains agents to read-only behavior. Do NOT use `-s read-only` because SQLite WAL mode requires write access to journal files, and agents must interact with `.codex/state.db`.
+Decompose the research into focused questions. Spawn a Codex agent for each question/area. Use `-s workspace-write` (the default) — the prompt constrains agents to read-only behavior. Do NOT use `-s read-only` because SQLite WAL mode requires write access to journal files, and agents must interact with `_codex/state.db`.
 
 ### Stage 3: Synthesis (Claude)
 
@@ -186,7 +186,7 @@ Review agent outputs via `codex-agent jobs --json` and `codex-agent events <id>`
 - Agent contradicts itself — investigate further
 - Agent misunderstands the codebase — discount that finding
 
-Write synthesis decision to `events` table in `.codex/state.db`.
+Write synthesis decision to `events` table in `_codex/state.db`.
 
 ### Stage 4: PRD Creation (Claude + User)
 
@@ -233,8 +233,8 @@ Decompose the PRD into independent, parallelizable tasks. Spawn a Codex agent fo
 **Artifact Gate (before advancing to Stage 6):** Claude MUST verify all implementation agents completed and file locks are released:
 
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT id, task, status FROM agents WHERE status NOT IN ('completed','failed');"
-sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT id, task, status FROM agents WHERE status NOT IN ('completed','failed');"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
 ```
 
 If any agents are still running or file locks remain, do NOT advance to review.
@@ -247,13 +247,13 @@ This is the only stage that uses both Codex and Claude review agents. Follow thi
 
 **Step 1: Codex Review Agents**
 
-Spawn Codex agents, each focused on a specific concern. Each writes findings to `.codex/reviews/codex-{focus}.md`. Choose review concerns based on the codebase and changes (e.g., security, error handling, data integrity). Use `workspace-write` (default) — agents need write access to `.codex/reviews/` and `.codex/state.db`.
+Spawn Codex agents, each focused on a specific concern. Each writes findings to `_codex/reviews/codex-{focus}.md`. Choose review concerns based on the codebase and changes (e.g., security, error handling, data integrity). Use `workspace-write` (default) — agents need write access to `_codex/reviews/` and `_codex/state.db`.
 
 ```bash
 codex-agent start "Review the implementation for [CONCERN].
-Write your findings to .codex/reviews/codex-[focus].md in markdown format.
+Write your findings to _codex/reviews/codex-[focus].md in markdown format.
 Focus on: [specific checklist].
-IMPORTANT: Do NOT modify any source code files. Only write to .codex/reviews/." --map
+IMPORTANT: Do NOT modify any source code files. Only write to _codex/reviews/." --map
 ```
 
 **Step 2: Claude Review Agents (5 Sonnet Agents in Parallel)**
@@ -296,7 +296,7 @@ For CLAUDE.md-flagged issues: the scoring agent MUST double-check that CLAUDE.md
 
 **Step 4: Cross-Model Synthesis**
 
-Read Codex findings from `.codex/reviews/codex-*.md`. Combine with Claude findings (filtered at threshold 80). Write synthesis to `.codex/reviews/synthesis.md`:
+Read Codex findings from `_codex/reviews/codex-*.md`. Combine with Claude findings (filtered at threshold 80). Write synthesis to `_codex/reviews/synthesis.md`:
 
 - Issues flagged by BOTH Codex and Claude = **HIGH CONFIDENCE** (prioritize these)
 - Issues flagged by Codex only
@@ -311,14 +311,14 @@ If the work is on a PR branch and a PR exists, ALSO invoke `code-review:code-rev
 
 Spawn Codex agents for test writing, test execution, and verification. Each agent gets a focused testing task.
 
-## 5. SQLite State Protocol (.codex/state.db)
+## 5. SQLite State Protocol (_codex/state.db)
 
-The `.codex/state.db` SQLite database is the coordination bus. It lives in the project root under `.codex/`.
+The `_codex/state.db` SQLite database is the coordination bus. It lives in the project root under `_codex/`.
 
 ### Directory Structure
 
 ```
-.codex/
+_codex/
 ├── state.db                # SQLite database (WAL mode)
 ├── state.db-wal            # WAL file (auto-created)
 ├── state.db-shm            # Shared memory file (auto-created)
@@ -416,20 +416,20 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
 
 ### Pre-Initialization: Context Recovery (MANDATORY)
 
-Before creating or reinitializing `.codex/state.db`, Claude MUST check for existing state and recover context. **NEVER skip this step.**
+Before creating or reinitializing `_codex/state.db`, Claude MUST check for existing state and recover context. **NEVER skip this step.**
 
 **Step 1: Check if state.db exists**
 
 ```bash
-test -f .codex/state.db && echo "EXISTS" || echo "NEW"
+test -f _codex/state.db && echo "EXISTS" || echo "NEW"
 ```
 
 **Step 2: If it exists, read ALL context before doing anything else**
 
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT stage, mission, progress, summary FROM mission WHERE id=1;" 2>/dev/null
-sqlite3 -header -column .codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;" 2>/dev/null
-sqlite3 -header -column .codex/state.db "SELECT timestamp, type, source, message FROM events ORDER BY id DESC LIMIT 20;" 2>/dev/null
+sqlite3 -header -column _codex/state.db "SELECT stage, mission, progress, summary FROM mission WHERE id=1;" 2>/dev/null
+sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;" 2>/dev/null
+sqlite3 -header -column _codex/state.db "SELECT timestamp, type, source, message FROM events ORDER BY id DESC LIMIT 20;" 2>/dev/null
 ```
 
 Use this context to understand:
@@ -445,7 +445,7 @@ If starting a new mission with existing data:
 - The old data stays — it provides valuable context for future missions
 
 ```bash
-sqlite3 .codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('info', 'claude', 'New mission starting. Previous mission archived in place.', (SELECT mission FROM mission WHERE id=1));" 2>/dev/null
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('info', 'claude', 'New mission starting. Previous mission archived in place.', (SELECT mission FROM mission WHERE id=1));" 2>/dev/null
 ```
 
 ### Destructive Action Policy
@@ -462,8 +462,8 @@ If tables grow excessively large (>1000 rows in checkpoints/events), Claude may 
 Claude initializes the database when starting a mission (tables use IF NOT EXISTS — safe to run on existing databases):
 
 ```bash
-mkdir -p .codex/reviews
-sqlite3 .codex/state.db <<'SQL'
+mkdir -p _codex/reviews
+sqlite3 _codex/state.db <<'SQL'
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS mission (id INTEGER PRIMARY KEY CHECK (id = 1), stage TEXT NOT NULL, mission TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, progress TEXT DEFAULT '', blockers TEXT DEFAULT '[]', next_steps TEXT DEFAULT '[]', summary TEXT DEFAULT '');
@@ -490,11 +490,11 @@ codex-agent start "
 
 Before you begin, run ALL of these commands to understand the current mission state:
 
-sqlite3 -header -column .codex/state.db \"SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;\"
-sqlite3 -header -column .codex/state.db \"SELECT id, task, status, files_modified FROM agents ORDER BY rowid;\"
-sqlite3 -header -column .codex/state.db \"SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id DESC LIMIT 10;\"
-sqlite3 -header -column .codex/state.db \"SELECT file_path, agent_id FROM file_locks;\"
-sqlite3 -header -column .codex/state.db \"SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 15;\"
+sqlite3 -header -column _codex/state.db \"SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;\"
+sqlite3 -header -column _codex/state.db \"SELECT id, task, status, files_modified FROM agents ORDER BY rowid;\"
+sqlite3 -header -column _codex/state.db \"SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id DESC LIMIT 10;\"
+sqlite3 -header -column _codex/state.db \"SELECT file_path, agent_id FROM file_locks;\"
+sqlite3 -header -column _codex/state.db \"SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 15;\"
 
 Read the output carefully. Understand:
 1. What is the overall mission and what stage it is in
@@ -508,8 +508,8 @@ Do NOT modify files that are locked by other agents.
 
 Then mark yourself as running:
 
-sqlite3 .codex/state.db \"UPDATE agents SET status='running' WHERE id='[jobId]';\"
-sqlite3 .codex/state.db \"INSERT INTO events (type, source, message) VALUES ('agent_start', 'agent-[jobId]', 'Starting: [task summary]');\"
+sqlite3 _codex/state.db \"UPDATE agents SET status='running' WHERE id='[jobId]';\"
+sqlite3 _codex/state.db \"INSERT INTO events (type, source, message) VALUES ('agent_start', 'agent-[jobId]', 'Starting: [task summary]');\"
 
 === YOUR TASK ===
 
@@ -523,7 +523,7 @@ CONSTRAINTS:
 - Only modify these files: [list specific files]
 - Follow existing code patterns
 - Do not modify files outside your scope
-[If research/review task: - IMPORTANT: Do NOT modify any source code files. Your task is to READ, ANALYZE, and REPORT only. The only files you may write to are .codex/state.db (via sqlite3) and .codex/reviews/ (if review).]
+[If research/review task: - IMPORTANT: Do NOT modify any source code files. Your task is to READ, ANALYZE, and REPORT only. The only files you may write to are _codex/state.db (via sqlite3) and _codex/reviews/ (if review).]
 
 [If UI work: Build production-grade UI. Use refined typography, spacing, micro-interactions, and visual hierarchy. The result should look like a shipped SaaS product, not a prototype.]
 
@@ -531,8 +531,8 @@ CONSTRAINTS:
 
 Claim the files you will modify so other agents avoid them:
 
-sqlite3 .codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file1]', '[jobId]');\"
-sqlite3 .codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file2]', '[jobId]');\"
+sqlite3 _codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file1]', '[jobId]');\"
+sqlite3 _codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file2]', '[jobId]');\"
 
 (Run one INSERT per file you plan to modify. INSERT OR IGNORE means it will not fail if another agent already claimed it — in that case, do NOT modify that file.)
 
@@ -540,7 +540,7 @@ sqlite3 .codex/state.db \"INSERT OR IGNORE INTO file_locks (file_path, agent_id)
 
 After completing each significant step, write a checkpoint:
 
-sqlite3 .codex/state.db \"INSERT INTO checkpoints (agent_id, message) VALUES ('[jobId]', '[what you just finished]');\"
+sqlite3 _codex/state.db \"INSERT INTO checkpoints (agent_id, message) VALUES ('[jobId]', '[what you just finished]');\"
 
 Write a checkpoint after each file you create or major change you make.
 
@@ -550,18 +550,18 @@ IMPORTANT: If your summary contains single quotes, escape them by doubling: repl
 
 After completing your task, run ALL of these commands:
 
-sqlite3 .codex/state.db \"UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='[LIST_FILES_YOU_MODIFIED]', summary='[2-3 sentence summary of what you did]' WHERE id='[jobId]';\"
-sqlite3 .codex/state.db \"INSERT INTO events (type, source, message, context) VALUES ('agent_complete', 'agent-[jobId]', 'Completed: [one-line summary]', '[list key files modified]');\"
-sqlite3 .codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
+sqlite3 _codex/state.db \"UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='[LIST_FILES_YOU_MODIFIED]', summary='[2-3 sentence summary of what you did]' WHERE id='[jobId]';\"
+sqlite3 _codex/state.db \"INSERT INTO events (type, source, message, context) VALUES ('agent_complete', 'agent-[jobId]', 'Completed: [one-line summary]', '[list key files modified]');\"
+sqlite3 _codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
 
 Replace [LIST_FILES_YOU_MODIFIED] with a JSON array (e.g. '[\"src/auth.ts\", \"src/types.ts\"]').
 The DELETE releases your file locks so subsequent agents can modify those files.
 
 If you FAIL or cannot complete the task, run instead:
 
-sqlite3 .codex/state.db \"UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[reason for failure]' WHERE id='[jobId]';\"
-sqlite3 .codex/state.db \"INSERT INTO events (type, source, message, context) VALUES ('agent_fail', 'agent-[jobId]', 'Failed: [reason]', '[error details]');\"
-sqlite3 .codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
+sqlite3 _codex/state.db \"UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[reason for failure]' WHERE id='[jobId]';\"
+sqlite3 _codex/state.db \"INSERT INTO events (type, source, message, context) VALUES ('agent_fail', 'agent-[jobId]', 'Failed: [reason]', '[error details]');\"
+sqlite3 _codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
 " --map -f "relevant/files/*.ts"
 ```
 
@@ -570,8 +570,8 @@ sqlite3 .codex/state.db \"DELETE FROM file_locks WHERE agent_id='[jobId]';\"
 Claude MUST register the agent in the database immediately after spawning:
 
 ```bash
-sqlite3 .codex/state.db "INSERT INTO agents (id, task, sandbox) VALUES ('{jobId}', '{task}', '{sandbox}');"
-sqlite3 .codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_spawn', 'claude', 'Spawned agent {jobId} for: {task}');"
+sqlite3 _codex/state.db "INSERT INTO agents (id, task, sandbox) VALUES ('{jobId}', '{task}', '{sandbox}');"
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_spawn', 'claude', 'Spawned agent {jobId} for: {task}');"
 ```
 
 ### Template Rules (STRICT)
@@ -580,7 +580,7 @@ sqlite3 .codex/state.db "INSERT INTO events (type, source, message) VALUES ('age
 2. **The sqlite3 commands are verbatim.** Do not paraphrase, simplify, or omit any query.
 3. **All 5 read queries in MISSION CONTEXT are mandatory.** Mission, agents, events, file_locks, checkpoints. All five, every time.
 4. **Claude fills in ONLY the bracketed parts** (`[Specific task description]`, `[cwd]`, `[list specific files]`, `[jobId]`, `[file1]`, `[file2]`). The rest is copy-paste.
-5. **For review agents**, omit BEFORE YOU START CODING (no file locks needed for source files), and append: `Write your findings to .codex/reviews/codex-{focus}.md in markdown format. Do NOT modify any source code files.` Do NOT use `-s read-only` — review agents need write access to `.codex/reviews/` and `.codex/state.db`.
+5. **For review agents**, omit BEFORE YOU START CODING (no file locks needed for source files), and append: `Write your findings to _codex/reviews/codex-{focus}.md in markdown format. Do NOT modify any source code files.` Do NOT use `-s read-only` — review agents need write access to `_codex/reviews/` and `_codex/state.db`.
 6. **For UI work**, include the production-grade UI line. For non-UI work, omit it.
 7. **File lock INSERTs** — Claude fills in the exact file paths. One INSERT per file.
 
@@ -611,30 +611,30 @@ codex-agent watch <id>           # live stream
 **SQLite status (agent self-reported):**
 
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
-sqlite3 -header -column .codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
-sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
-sqlite3 -header -column .codex/state.db "SELECT timestamp, source, message FROM events WHERE type IN ('agent_complete', 'agent_fail') ORDER BY id;"
+sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
+sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT timestamp, source, message FROM events WHERE type IN ('agent_complete', 'agent_fail') ORDER BY id;"
 ```
 
 **Update mission progress:**
 
 ```bash
-sqlite3 .codex/state.db "UPDATE mission SET progress='3 of 5 agents complete', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
+sqlite3 _codex/state.db "UPDATE mission SET progress='3 of 5 agents complete', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
 ```
 
 **Mission completion summary** (when ALL agents done):
 
 ```bash
-sqlite3 .codex/state.db "UPDATE mission SET stage='completed', progress='All agents complete', summary='[2-5 paragraph summary: what was built, agent breakdown, files changed, review findings, outstanding items]', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
+sqlite3 _codex/state.db "UPDATE mission SET stage='completed', progress='All agents complete', summary='[2-5 paragraph summary: what was built, agent breakdown, files changed, review findings, outstanding items]', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
 ```
 
 **Fallback (agent didn't self-report):**
 
 ```bash
-sqlite3 .codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='Did not self-report. Marked failed by Claude.' WHERE id='{jobId}';"
-sqlite3 .codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_fail', 'claude', 'Agent {jobId} did not self-report. Marked failed by Claude.');"
-sqlite3 .codex/state.db "DELETE FROM file_locks WHERE agent_id='{jobId}';"
+sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='Did not self-report. Marked failed by Claude.' WHERE id='{jobId}';"
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_fail', 'claude', 'Agent {jobId} did not self-report. Marked failed by Claude.');"
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{jobId}';"
 ```
 
 ### Control
@@ -672,9 +672,9 @@ codex-agent health               # verify codex available
 
 **NEVER use `-s read-only` for any agent.** All agents MUST use `workspace-write` (the default).
 
-**Why:** SQLite WAL mode requires write access to create `-wal` and `-shm` journal files. On Windows (MINGW/Git Bash), the `read-only` sandbox blocks this access entirely, making `.codex/state.db` unreadable. Even a simple SELECT query fails because SQLite cannot open the WAL journal.
+**Why:** SQLite WAL mode requires write access to create `-wal` and `-shm` journal files. On Windows (MINGW/Git Bash), the `read-only` sandbox blocks this access entirely, making `_codex/state.db` unreadable. Even a simple SELECT query fails because SQLite cannot open the WAL journal.
 
-Additionally, review agents need to write findings to `.codex/reviews/`, which also requires write access.
+Additionally, review agents need to write findings to `_codex/reviews/`, which also requires write access.
 
 **How read-only behavior is enforced:** For research and review agents, the PROMPT explicitly constrains the agent: "Do NOT modify any source code files." This is a behavioral constraint, not a sandbox restriction. The agent template already limits which files agents can touch via the CONSTRAINTS section.
 
@@ -717,8 +717,8 @@ Additionally, review agents need to write findings to `.codex/reviews/`, which a
    ```
 2. Update the database (if agent didn't self-report):
    ```bash
-   sqlite3 .codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id='{id}';"
-   sqlite3 .codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
+   sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id='{id}';"
+   sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
    ```
 3. Decide: retry with adjusted prompt (max 2 retries), or skip and inform user.
 
@@ -726,13 +726,13 @@ Additionally, review agents need to write findings to `.codex/reviews/`, which a
 
 After Claude's context compacts, immediately:
 
-1. `sqlite3 -header -column .codex/state.db "SELECT * FROM mission;"` — orchestration state
-2. `sqlite3 -header -column .codex/state.db "SELECT * FROM agents;"` — agent statuses
-3. `sqlite3 -header -column .codex/state.db "SELECT * FROM events WHERE source='claude' ORDER BY id;"` — past decisions
-4. `sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"` — active file claims
-5. `sqlite3 -header -column .codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"` — recent progress
+1. `sqlite3 -header -column _codex/state.db "SELECT * FROM mission;"` — orchestration state
+2. `sqlite3 -header -column _codex/state.db "SELECT * FROM agents;"` — agent statuses
+3. `sqlite3 -header -column _codex/state.db "SELECT * FROM events WHERE source='claude' ORDER BY id;"` — past decisions
+4. `sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"` — active file claims
+5. `sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"` — recent progress
 6. Run `codex-agent jobs --json` for live agent processes
-7. Resume from database state — `.codex/state.db` is your continuity mechanism
+7. Resume from database state — `_codex/state.db` is your continuity mechanism
 
 ### Concurrent Agent Interference
 

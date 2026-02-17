@@ -57,23 +57,23 @@ codex-agent watch <jobId>
 
 ### SQLite State (Project-Level)
 
-When used via the SKILL.md orchestration protocol, agents coordinate through `.codex/state.db`:
+When used via the SKILL.md orchestration protocol, agents coordinate through `_codex/state.db`:
 
 ```bash
 # Mission status
-sqlite3 -header -column .codex/state.db "SELECT stage, mission, progress FROM mission WHERE id=1;"
+sqlite3 -header -column _codex/state.db "SELECT stage, mission, progress FROM mission WHERE id=1;"
 
 # Agent status
-sqlite3 -header -column .codex/state.db "SELECT id, task, status, summary FROM agents;"
+sqlite3 -header -column _codex/state.db "SELECT id, task, status, summary FROM agents;"
 
 # Recent events
-sqlite3 -header -column .codex/state.db "SELECT timestamp, source, message FROM events ORDER BY id DESC LIMIT 10;"
+sqlite3 -header -column _codex/state.db "SELECT timestamp, source, message FROM events ORDER BY id DESC LIMIT 10;"
 
 # Active file locks
-sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
 
 # Progress checkpoints
-sqlite3 -header -column .codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
+sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
 ```
 
 ## Common Issues
@@ -127,12 +127,12 @@ codex-agent start "simplified prompt" -r xhigh --map
 
 **Diagnose:**
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
 ```
 
 **Fix:** The SKILL.md protocol uses `file_locks` table to prevent this. If locks are stale (agent crashed without releasing):
 ```bash
-sqlite3 .codex/state.db "DELETE FROM file_locks WHERE agent_id='<crashed-agent-id>';"
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='<crashed-agent-id>';"
 ```
 
 ### "windows sandbox: not enough space on disk"
@@ -158,11 +158,11 @@ codex --login
 After Claude's context compacts mid-orchestration, recover state from SQLite:
 
 ```bash
-sqlite3 -header -column .codex/state.db "SELECT * FROM mission;"
-sqlite3 -header -column .codex/state.db "SELECT * FROM agents;"
-sqlite3 -header -column .codex/state.db "SELECT * FROM events WHERE source='claude' ORDER BY id;"
-sqlite3 -header -column .codex/state.db "SELECT file_path, agent_id FROM file_locks;"
-sqlite3 -header -column .codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
+sqlite3 -header -column _codex/state.db "SELECT * FROM mission;"
+sqlite3 -header -column _codex/state.db "SELECT * FROM agents;"
+sqlite3 -header -column _codex/state.db "SELECT * FROM events WHERE source='claude' ORDER BY id;"
+sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
+sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
 codex-agent jobs --json
 ```
 
@@ -176,7 +176,7 @@ If an agent made bad changes to your project:
 
 ```bash
 # See what the agent modified
-sqlite3 .codex/state.db "SELECT files_modified FROM agents WHERE id='<agent-id>';"
+sqlite3 _codex/state.db "SELECT files_modified FROM agents WHERE id='<agent-id>';"
 
 # Revert with git
 git checkout -- <file1> <file2>
@@ -202,7 +202,7 @@ Restart Claude Code after reverting.
 rm -rf ~/.codex-agent/jobs/*
 
 # Remove project-level orchestration state
-rm -rf .codex/
+rm -rf _codex/
 
 # Rebuild from scratch
 codex-agent health

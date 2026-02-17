@@ -224,10 +224,10 @@ The skill follows a 7-stage pipeline: **Ideation -> Research -> Synthesis -> PRD
 
 ### SQLite State Bus
 
-Multi-agent coordination happens through `.codex/state.db` in your project directory. Claude initializes it, agents read/write their own state, and all coordination happens through SQL.
+Multi-agent coordination happens through `_codex/state.db` in your project directory. Claude initializes it, agents read/write their own state, and all coordination happens through SQL.
 
 ```
-.codex/
+_codex/
 ├── state.db              # SQLite database (WAL mode)
 └── reviews/              # Code review markdown files
 ```
@@ -247,7 +247,7 @@ The database uses WAL mode for concurrent access — unlimited readers, single w
 ### How Coordination Works
 
 ```
-1. Claude creates .codex/state.db and writes the mission row
+1. Claude creates _codex/state.db and writes the mission row
 2. Claude registers each agent in the agents table (status: pending)
 3. Claude spawns codex-agent processes via `codex-agent start`
 4. Each agent reads the mission table and its own agent row to learn its task
@@ -262,7 +262,7 @@ Key rules:
 - **Agents never write to the `mission` table** — only Claude controls pipeline state
 - **Agents only UPDATE their own row** in the `agents` table — Claude does all INSERTs
 - **File locks use INSERT OR IGNORE** — if a file is already locked, the agent skips it
-- The database is created at mission start and persists until manually cleaned up (`rm -rf .codex/`)
+- The database is created at mission start and persists until manually cleaned up (`rm -rf _codex/`)
 
 ### Dual-Model Code Review (Stage 6)
 

@@ -21,4 +21,4 @@ Thumbs.db
 bun.lockb
 
 # Project-level orchestration state (created in user projects, not this repo)
-.codex/
+_codex/
