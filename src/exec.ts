@@ -60,16 +60,15 @@ export function startExec(options: {
   writeFileSync(promptFile, options.prompt);
 
   try {
-    // Build command args for codex exec --json
+    // Build command flags for codex exec --json (prompt passed separately via env var)
     // --ephemeral prevents session file conflicts when running multiple agents
-    const args = [
+    const flagArgs = [
       "exec", "--json",
       "--ephemeral",
       "-m", options.model,
       "-c", `model_reasoning_effort=${options.reasoningEffort}`,
       "-s", options.sandbox,
       "--full-auto",
-      options.prompt,
     ];
 
     // Use bash to spawn codex in the background with shell-level redirection.
@@ -78,13 +77,20 @@ export function startExec(options: {
     // - & backgrounds the process so bash exits immediately
     // - echo $! captures the background process PID
     // - Works on Linux, macOS, and Windows (MINGW/Git Bash)
-    const shellArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-    const shellCmd = `codex ${shellArgs} > '${jsonlPath.replace(/\\/g, "/")}' 2> '${stderrPath.replace(/\\/g, "/")}' & echo $!`;
+    //
+    // IMPORTANT: The prompt is passed via CODEX_PROMPT env var, NOT as a shell
+    // argument. "$CODEX_PROMPT" in double quotes expands the variable but does
+    // NOT re-interpret special characters ($, `, \) in the content. This avoids
+    // all bash quoting issues with complex prompts containing SQL, markdown
+    // backticks, nested quotes, etc.
+    const shellArgs = flagArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+    const shellCmd = `codex ${shellArgs} "$CODEX_PROMPT" > '${jsonlPath.replace(/\\/g, "/")}' 2> '${stderrPath.replace(/\\/g, "/")}' & echo $!`;
 
     const result = spawnSync("bash", ["-c", shellCmd], {
       cwd: options.cwd,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, CODEX_PROMPT: options.prompt },
     });
 
     if (result.status !== 0) {
