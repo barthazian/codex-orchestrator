@@ -94,7 +94,7 @@ codex-agent health
 codex-agent start "test prompt" --dry-run
 
 # Start a real agent
-codex-agent start "List files in the current directory" -s read-only
+codex-agent start "List files in the current directory"
 
 # Monitor
 codex-agent jobs --json

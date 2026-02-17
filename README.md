@@ -180,9 +180,9 @@ Get structured job data with `jobs --json`:
 
 ```bash
 # Spawn multiple agents to investigate different areas
-codex-agent start "Audit authentication flow" -r high --map -s read-only
-codex-agent start "Review database queries for N+1 issues" -r high --map -s read-only
-codex-agent start "Check for XSS vulnerabilities in templates" -r high --map -s read-only
+codex-agent start "Audit authentication flow. Do NOT modify source files." -r high --map
+codex-agent start "Review database queries for N+1 issues. Do NOT modify source files." -r high --map
+codex-agent start "Check for XSS vulnerabilities in templates. Do NOT modify source files." -r high --map
 
 # Check on all of them
 codex-agent jobs --json
@@ -213,7 +213,7 @@ codex-agent start "Understand the architecture" --map -r high
 When installed as a Claude Code plugin, the **codex-orchestrator skill** teaches Claude how to use the CLI automatically. Claude becomes the orchestrator:
 
 - Breaks your requests into agent-sized tasks
-- Spawns agents with the right flags (read-only for research, workspace-write for implementation)
+- Spawns agents with the right flags and behavioral constraints (research agents don't modify source files, implementation agents do)
 - Monitors agent progress via JSONL events and SQLite state
 - Synthesizes findings from multiple agents
 - Runs dual-model code review (Codex agents + Claude Sonnet reviewers)
@@ -290,7 +290,7 @@ See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md)
 - Use `jobs --json` to get structured data (tokens, files, summary) in one call
 - Use `-r xhigh` for complex tasks that need deep reasoning
 - Use `--map` to give agents codebase context (requires docs/CODEBASE_MAP.md)
-- Use `-s read-only` for research tasks that shouldn't modify files
+- Use `workspace-write` (default) for all agents — `read-only` breaks SQLite WAL on Windows
 - Kill stuck jobs with `codex-agent kill <id>` only as a last resort
 
 ## License

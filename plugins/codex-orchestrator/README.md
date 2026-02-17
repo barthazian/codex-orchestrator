@@ -82,7 +82,7 @@ YOUR REQUEST
      v
 [IDEATION] --> [RESEARCH] --> [SYNTHESIS] --> [PRD] --> [IMPLEMENTATION] --> [REVIEW] --> [TESTING]
   Claude        Codex          Claude         Claude      Codex             Dual-model    Codex
-  + You         read-only                     + You       workspace-write   Codex+Claude  workspace-write
+  + You         workspace-write               + You       workspace-write   Codex+Claude  workspace-write
 ```
 
 **Claude** handles strategic stages: ideation, synthesis, PRD creation.
@@ -103,7 +103,7 @@ Codex agents take time - this is normal and expected:
 The plugin uses the `codex-agent` CLI under the hood:
 
 ```bash
-codex-agent start "task" -r high --map -s read-only   # spawn
+codex-agent start "task" -r high --map                 # spawn
 codex-agent jobs --json                                # monitor
 codex-agent capture <id>                               # check output
 codex-agent events <id>                                # view JSONL events

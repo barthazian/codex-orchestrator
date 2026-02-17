@@ -127,7 +127,7 @@ USER'S REQUEST
      v
 1. IDEATION        (Claude + User)
      |
-2. RESEARCH        (Claude spawns N read-only agents)
+2. RESEARCH        (Claude spawns N workspace-write agents, read-only behavior)
      |
 3. SYNTHESIS       (Claude)
      |
@@ -147,7 +147,7 @@ USER'S REQUEST
 | Signal | Stage | Action |
 |--------|-------|--------|
 | New feature request, vague problem | IDEATION | Discuss with user, clarify scope |
-| "investigate", "research", "understand" | RESEARCH | Spawn read-only Codex agents |
+| "investigate", "research", "understand" | RESEARCH | Spawn workspace-write Codex agents (read-only behavior) |
 | Agent findings ready, need synthesis | SYNTHESIS | Claude reviews, filters, combines |
 | "let's plan", "create PRD", synthesis done | PRD | Claude writes PRD to docs/prds/ |
 | PRD exists, "implement", "build" | IMPLEMENTATION | Spawn workspace-write Codex agents |
@@ -158,9 +158,9 @@ USER'S REQUEST
 
 Talk through the problem with the user. Understand what they want. Plan how to decompose the work into agent-sized tasks. Even seemingly simple tasks go to Codex agents — you are the orchestrator, not the implementer.
 
-### Stage 2: Research (Claude spawns read-only agents)
+### Stage 2: Research (Claude spawns workspace-write agents, read-only behavior)
 
-Decompose the research into focused questions. Spawn a Codex agent for each question/area with `-s read-only`.
+Decompose the research into focused questions. Spawn a Codex agent for each question/area. Use `-s workspace-write` (the default) — the prompt constrains agents to read-only behavior. Do NOT use `-s read-only` because SQLite WAL mode requires write access to journal files, and agents must interact with `.codex/state.db`.
 
 ### Stage 3: Synthesis (Claude)
 
@@ -231,12 +231,13 @@ This is the only stage that uses both Codex and Claude review agents. Follow thi
 
 **Step 1: Codex Review Agents**
 
-Spawn read-only Codex agents, each focused on a specific concern. Each writes findings to `.codex/reviews/codex-{focus}.md`. Choose review concerns based on the codebase and changes (e.g., security, error handling, data integrity).
+Spawn Codex agents, each focused on a specific concern. Each writes findings to `.codex/reviews/codex-{focus}.md`. Choose review concerns based on the codebase and changes (e.g., security, error handling, data integrity). Use `workspace-write` (default) — agents need write access to `.codex/reviews/` and `.codex/state.db`.
 
 ```bash
 codex-agent start "Review the implementation for [CONCERN].
 Write your findings to .codex/reviews/codex-[focus].md in markdown format.
-Focus on: [specific checklist]." -s read-only --map
+Focus on: [specific checklist].
+IMPORTANT: Do NOT modify any source code files. Only write to .codex/reviews/." --map
 ```
 
 **Step 2: Claude Review Agents (5 Sonnet Agents in Parallel)**
@@ -506,6 +507,7 @@ CONSTRAINTS:
 - Only modify these files: [list specific files]
 - Follow existing code patterns
 - Do not modify files outside your scope
+[If research/review task: - IMPORTANT: Do NOT modify any source code files. Your task is to READ, ANALYZE, and REPORT only. The only files you may write to are .codex/state.db (via sqlite3) and .codex/reviews/ (if review).]
 
 [If UI work: Build production-grade UI. Use refined typography, spacing, micro-interactions, and visual hierarchy. The result should look like a shipped SaaS product, not a prototype.]
 
@@ -562,7 +564,7 @@ sqlite3 .codex/state.db "INSERT INTO events (type, source, message) VALUES ('age
 2. **The sqlite3 commands are verbatim.** Do not paraphrase, simplify, or omit any query.
 3. **All 5 read queries in MISSION CONTEXT are mandatory.** Mission, agents, events, file_locks, checkpoints. All five, every time.
 4. **Claude fills in ONLY the bracketed parts** (`[Specific task description]`, `[cwd]`, `[list specific files]`, `[jobId]`, `[file1]`, `[file2]`). The rest is copy-paste.
-5. **For review agents**, add `-s read-only`, omit BEFORE YOU START CODING (no file locks needed), and append: `Write your findings to .codex/reviews/codex-{focus}.md in markdown format.`
+5. **For review agents**, omit BEFORE YOU START CODING (no file locks needed for source files), and append: `Write your findings to .codex/reviews/codex-{focus}.md in markdown format. Do NOT modify any source code files.` Do NOT use `-s read-only` — review agents need write access to `.codex/reviews/` and `.codex/state.db`.
 6. **For UI work**, include the production-grade UI line. For non-UI work, omit it.
 7. **File lock INSERTs** — Claude fills in the exact file paths. One INSERT per file.
 
@@ -571,7 +573,7 @@ sqlite3 .codex/state.db "INSERT INTO events (type, source, message) VALUES ('age
 ### Spawning Agents
 
 ```bash
-codex-agent start "[TASK PROMPT]" --map -s read-only    # research
+codex-agent start "[TASK PROMPT]" --map                  # research (read-only behavior in prompt)
 codex-agent start "[TASK PROMPT]" --map                  # implementation
 codex-agent start "[TASK PROMPT]" --map -f "file.md"     # with file context
 ```
@@ -649,6 +651,16 @@ codex-agent health               # verify codex available
 | Sandbox | `workspace-write` | Agents can modify files by default |
 
 ## 8. Operational Policies
+
+### Sandbox Mode: workspace-write for ALL agents
+
+**NEVER use `-s read-only` for any agent.** All agents MUST use `workspace-write` (the default).
+
+**Why:** SQLite WAL mode requires write access to create `-wal` and `-shm` journal files. On Windows (MINGW/Git Bash), the `read-only` sandbox blocks this access entirely, making `.codex/state.db` unreadable. Even a simple SELECT query fails because SQLite cannot open the WAL journal.
+
+Additionally, review agents need to write findings to `.codex/reviews/`, which also requires write access.
+
+**How read-only behavior is enforced:** For research and review agents, the PROMPT explicitly constrains the agent: "Do NOT modify any source code files." This is a behavioral constraint, not a sandbox restriction. The agent template already limits which files agents can touch via the CONSTRAINTS section.
 
 ### Timeout
 

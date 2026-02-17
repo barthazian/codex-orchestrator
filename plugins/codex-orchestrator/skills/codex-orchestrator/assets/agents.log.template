@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
 | id | TEXT | codex-agent job ID (primary key) |
 | task | TEXT | Description of assigned task |
 | status | TEXT | pending, running, completed, or failed |
-| sandbox | TEXT | read-only or workspace-write |
+| sandbox | TEXT | workspace-write (always — read-only breaks SQLite WAL on Windows) |
 | started_at | TEXT | ISO 8601 timestamp (auto-set) |
 | completed_at | TEXT | ISO 8601 timestamp when finished (null if running) |
 | files_modified | TEXT | JSON array of modified file paths |
