@@ -60,16 +60,18 @@ Claude breaks work into focused, independent tasks and spawns a Codex agent for 
 - Doing extensive file reads for delegation context
 
 **Agent's job:**
-- Run ALL Mission Context Header sqlite3 queries FIRST (mission, agents, events, file_locks, checkpoints)
-- Transition own status from `pending` to `running` and write `agent_start` event
-- Check file_locks — do NOT touch files locked by other agents
-- Claim files via file_locks INSERT before modifying them
-- Write progress checkpoints during work
+- Read the pre-injected mission context (provided as plain text in the prompt — no DB queries needed)
 - Execute the focused task from Claude
 - Write clean code following existing patterns
-- Stay within scope — do not modify files outside the task
-- On completion: update own agents row (status, files_modified, summary), write completion event, release file locks
+- Stay within scope — only modify files listed in YOUR FILES (pre-locked by Claude)
+- On completion: run the single sqlite3 heredoc to report status and summary
 - Exit when done — output captured automatically via JSONL
+
+**What agents do NOT do:**
+- Agents do NOT query the database (context is pre-injected by Claude)
+- Agents do NOT manage file locks (Claude pre-locks before spawn, releases after completion)
+- Agents do NOT write checkpoints (Claude monitors via `codex-agent capture`)
+- Agents do NOT transition their own status to running (Claude does this at spawn time)
 
 ### Rule 3: Claude Subagents for Review
 
@@ -77,7 +79,7 @@ Use Claude subagents (Task tool) during Stage 6 (Review) for dual-model code rev
 
 ### Rule 4: Write Ownership Is Strict
 
-See Section 5 for the full ownership table and rules. In summary: Claude owns the `mission` table and agent registration. Agents own their own row updates, file locks, and checkpoints. No writer ever modifies another writer's rows.
+See Section 5 for the full ownership table and rules. In summary: Claude owns the `mission` table, agent registration, file locks, and all status transitions. Agents own only their completion self-report (UPDATE own row + INSERT completion event). No writer ever modifies another writer's rows.
 
 ## 3. Prerequisites
 
@@ -249,22 +251,65 @@ If any agents are still running or file locks remain, do NOT advance to review.
 
 ### Stage 6: Review (DUAL-MODEL) — Complete Protocol
 
-This is the only stage that uses both Codex and Claude review agents. Follow this protocol exactly.
+This is the only stage that uses both Codex and Claude review agents. Follow this protocol exactly. All findings are stored in the `review_findings` table in `_codex/state.db` for structured querying, cross-model dedup, and telemetry.
 
-**Step 1: Codex Review Agents**
+**Step 0: Deterministic Quality Gate (HARD FAIL)**
 
-Spawn Codex agents, each focused on a specific concern. Each writes findings to `_codex/reviews/codex-{focus}.md`. Choose review concerns based on the codebase and changes (e.g., security, error handling, data integrity). Use `workspace-write` (default) — agents need write access to `_codex/reviews/` and `_codex/state.db`.
+Before spending tokens on LLM review, run deterministic checks. These catch issues that don't need AI.
 
 ```bash
-codex-agent start "Review the implementation for [CONCERN].
-Write your findings to _codex/reviews/codex-[focus].md in markdown format.
-Focus on: [specific checklist].
-IMPORTANT: Do NOT modify any source code files. Only write to _codex/reviews/." --map
+codex-agent review gate
 ```
 
-**Step 2: Claude Review Agents (5 Sonnet Agents in Parallel)**
+This runs (in order, stopping on first failure):
+1. `tsc --noEmit` (or project's type-check command)
+2. `bun test` / `npm test` (if test suite exists)
+3. Linter (eslint/biome if configured)
 
-Launch 5 parallel Sonnet agents via the Task tool. Each independently reviews the implementation and returns a list of issues with reasons:
+**If the gate fails, STOP. Fix the issues before proceeding.** Do not send broken code to review agents.
+
+For JSON output (machine-readable): `codex-agent review gate --json`
+
+**Step 1: Freeze Diff Scope**
+
+Establish the exact set of files modified by implementation agents. All reviewers MUST scope their analysis to these files only.
+
+```bash
+# Get the diff scope from state.db
+sqlite3 _codex/state.db "SELECT DISTINCT files_modified FROM agents WHERE status='completed';"
+# Or from git if available
+git diff --name-only <base-sha>..HEAD
+```
+
+Store this file list — pass it to every review agent's prompt to prevent scope creep.
+
+**Step 2: Codex Review (via `codex review`)**
+
+Use the built-in `codex review` command instead of `codex exec`. This gives structured, deterministic review output scoped to the diff.
+
+```bash
+# Review uncommitted changes
+codex review --uncommitted
+
+# Or review against a base commit
+codex review --base <sha>
+
+# With specific model
+codex review --model gpt-5.3-codex --base <sha>
+```
+
+Parse the output and store each finding in `review_findings` via the stateStore API:
+
+```bash
+# Claude inserts findings programmatically via stateStore.insertFinding()
+# or agents write structured JSON that Claude parses and inserts
+```
+
+Each finding MUST include: `agent_id`, `model`, `path`, `line` (if known), `severity` (critical/high/medium/low), `confidence` (0-100), `category`, `description`, `evidence`, `suggested_fix`, `in_diff` (true/false).
+
+**Step 3: Claude Review Agents (5 Sonnet Agents in Parallel)**
+
+Launch 5 parallel Sonnet agents via the Task tool. Each independently reviews the implementation and returns findings as structured JSON arrays:
 
 | Agent | Focus | What to check |
 |-------|-------|---------------|
@@ -274,11 +319,13 @@ Launch 5 parallel Sonnet agents via the Task tool. Each independently reviews th
 | #4 | Cross-agent conflicts | Check files modified by multiple agents for consistency. Verify no contradictory changes. Check pattern adherence. |
 | #5 | Error handling + edge cases | Swallowed errors, missing validation, raw errors exposed to clients, unhandled edge cases. |
 
-Each agent returns findings in-memory (NOT to disk).
+Each agent returns findings as JSON: `[{path, line, severity, confidence, category, description, evidence, suggested_fix}]`
 
-**Step 3: Confidence Scoring**
+**IMPORTANT**: Pass the frozen diff scope (Step 1) to each agent. Agents MUST NOT review files outside the scope.
 
-For each issue from Step 2, launch a parallel Haiku agent that scores confidence 0-100:
+**Step 4: Confidence Scoring**
+
+For each issue from Step 3, launch a parallel Haiku agent that scores confidence 0-100:
 
 | Score | Meaning |
 |-------|---------|
@@ -294,22 +341,43 @@ For CLAUDE.md-flagged issues: the scoring agent MUST double-check that CLAUDE.md
 
 **False positives to filter** (give this list to review and scoring agents):
 - Pre-existing issues not introduced by this mission's agents
-- Issues that linters, typecheckers, or compilers would catch
+- Issues that linters, typecheckers, or compilers would catch (the gate already caught these)
 - Pedantic nitpicks a senior engineer wouldn't flag
 - General quality issues unless explicitly required by CLAUDE.md
 - Intentional functionality changes related to the mission
 - Issues on lines not modified by agents
 
-**Step 4: Cross-Model Synthesis**
+**Step 5: Store All Findings in state.db**
 
-Read Codex findings from `_codex/reviews/codex-*.md`. Combine with Claude findings (filtered at threshold 80). Write synthesis to `_codex/reviews/synthesis.md`:
+After scoring, Claude inserts ALL surviving findings (confidence >= 80) into the `review_findings` table. Use `insertFinding()` from `stateStore.ts`:
+
+- Set `agent_id` to the reviewing agent's ID (e.g., `codex-review`, `claude-review-1` through `claude-review-5`)
+- Set `model` to identify the source model (e.g., `codex`, `claude-sonnet`)
+- Set `in_diff = 1` for all findings from properly scoped agents
+
+Verify insertion:
+```bash
+codex-agent review findings
+codex-agent review summary
+```
+
+**Step 6: Cross-Model Synthesis**
+
+Query `review_findings` for cross-model agreement. Findings flagged by BOTH Codex and Claude on the same `path + line + category` are high-confidence:
+
+```bash
+codex-agent review summary
+```
+
+The `confirmed_by_both` count shows cross-model agreement. Write synthesis to `_codex/reviews/synthesis.md`:
 
 - Issues flagged by BOTH Codex and Claude = **HIGH CONFIDENCE** (prioritize these)
-- Issues flagged by Codex only
-- Issues flagged by Claude only (scored >=80)
+- Issues flagged by Codex only (model contains 'codex')
+- Issues flagged by Claude only (model contains 'claude', scored >= 80)
 - Recommended actions
+- Telemetry: total findings, by severity, by status, confirmed_by_both
 
-**Step 5: PR Review (Optional)**
+**Step 7: PR Review (Optional)**
 
 If the work is on a PR branch and a PR exists, ALSO invoke `code-review:code-review` for PR-specific analysis (prior PR comments, `gh` integration, GitHub comment posting). If no PR exists, skip this step.
 
@@ -366,10 +434,7 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-  type TEXT NOT NULL CHECK (type IN (
-    'course_correction', 'approval', 'abort', 'info',
-    'stage_change', 'agent_spawn', 'agent_start', 'agent_complete', 'agent_fail'
-  )),
+  type TEXT NOT NULL,
   source TEXT NOT NULL,
   message TEXT NOT NULL,
   context TEXT
@@ -390,35 +455,55 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
+CREATE TABLE IF NOT EXISTS review_findings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  path TEXT NOT NULL,
+  line INTEGER,
+  severity TEXT NOT NULL CHECK (severity IN ('critical','high','medium','low')),
+  confidence INTEGER NOT NULL CHECK (confidence BETWEEN 0 AND 100),
+  category TEXT NOT NULL,
+  description TEXT NOT NULL,
+  evidence TEXT,
+  suggested_fix TEXT,
+  in_diff INTEGER DEFAULT 1,
+  status TEXT DEFAULT 'open' CHECK (status IN ('open','confirmed','dismissed','fixed')),
+  created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
+CREATE INDEX IF NOT EXISTS idx_findings_status ON review_findings(status);
+CREATE INDEX IF NOT EXISTS idx_findings_path ON review_findings(path);
 ```
 
 ### Write Ownership Table
 
 | Table/File | Writer | Reader |
 |------------|--------|--------|
-| `mission` table | Claude only | Claude, Codex agents |
-| `agents` table (INSERT) | Claude only | Claude, Codex agents |
-| `agents` table (UPDATE own row) | Each agent by ID | Claude, Codex agents |
-| `events` table | Claude (source='claude'), Agents (source='agent-{id}') | Claude, Codex agents |
-| `file_locks` table | Codex agents (claim on start, release on finish) | Claude, Codex agents |
-| `checkpoints` table | Codex agents (progress updates during work) | Claude, Codex agents |
-| `reviews/codex-*.md` | Codex review agents (file writes) | Claude |
+| `mission` table | Claude only | Claude |
+| `agents` table (INSERT, status transitions) | Claude only | Claude |
+| `agents` table (UPDATE on completion) | Each agent (own row only) | Claude |
+| `events` table | Claude (source='claude'), Agents (source='agent-{id}') | Claude |
+| `file_locks` table | Claude only (pre-lock before spawn, release after completion) | Claude |
+| `checkpoints` table | Not used (removed — Claude monitors via `codex-agent capture`) | — |
+| `review_findings` table | Claude (inserts parsed findings from all reviewers) | Claude, User |
+| `reviews/codex-*.md` | Codex review agents (file writes, legacy — prefer `review_findings`) | Claude |
 | `reviews/synthesis.md` | Claude | User |
 
-**Agent write rules:**
-- Agents READ all tables via SELECT queries in the Mission Context Header
-- Agents UPDATE only their OWN row in `agents` (`status`, `completed_at`, `files_modified`, `summary`)
-- Agents INSERT into `file_locks` to claim files before modifying them
-- Agents INSERT into `checkpoints` to report incremental progress
+**Agent write rules (minimal):**
+- Agents receive all context pre-injected in their prompt — NO sqlite3 SELECT queries
+- Agents UPDATE only their OWN row in `agents` on completion (`status`, `completed_at`, `files_modified`, `summary`)
 - Agents INSERT one completion/failure event in `events` (source='agent-{their-id}')
-- Agents DELETE only their OWN rows from `file_locks` when done
+- Agents do NOT touch `file_locks` — Claude manages all lock lifecycle
+- Agents do NOT write to `checkpoints` — this table exists for backward compatibility but is no longer used
 - Agents NEVER write to the `mission` table
-- Agents NEVER modify other agents' rows or delete other agents' file locks
+- Agents NEVER modify other agents' rows
 
-**Why this is conflict-free**: SQLite WAL mode allows concurrent reads with sequential writes. `busy_timeout=5000` queues writes if two hit simultaneously. Since writes are small (single INSERT/UPDATE) and infrequent, contention is near-zero.
+**Why this is conflict-free**: Claude is the primary DB writer (pre-spawn setup, post-completion cleanup). Agents write exactly ONE sqlite3 heredoc on completion (UPDATE + INSERT). WAL mode + `busy_timeout=5000` handles the rare case of simultaneous completion by two agents.
 
 ### Pre-Initialization: Context Recovery (MANDATORY)
 
@@ -465,63 +550,68 @@ If tables grow excessively large (>1000 rows in checkpoints/events), Claude may 
 
 ### Initialization
 
-Claude initializes the database when starting a mission (tables use IF NOT EXISTS — safe to run on existing databases):
+Claude initializes the database when starting a mission. The `mission init` command creates the `_codex/` directory, initializes the DB schema (all tables with IF NOT EXISTS), inserts the mission row, and logs an init event — all in a single command:
 
 ```bash
-mkdir -p _codex/reviews
-sqlite3 _codex/state.db <<'SQL'
-PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
-CREATE TABLE IF NOT EXISTS mission (id INTEGER PRIMARY KEY CHECK (id = 1), stage TEXT NOT NULL, mission TEXT NOT NULL, started_at TEXT NOT NULL, updated_at TEXT NOT NULL, progress TEXT DEFAULT '', blockers TEXT DEFAULT '[]', next_steps TEXT DEFAULT '[]', summary TEXT DEFAULT '');
-CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, task TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')), sandbox TEXT DEFAULT 'workspace-write', started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), completed_at TEXT, files_modified TEXT DEFAULT '[]', summary TEXT DEFAULT '');
-CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), type TEXT NOT NULL CHECK (type IN ('course_correction', 'approval', 'abort', 'info', 'stage_change', 'agent_spawn', 'agent_start', 'agent_complete', 'agent_fail')), source TEXT NOT NULL, message TEXT NOT NULL, context TEXT);
-CREATE TABLE IF NOT EXISTS file_locks (file_path TEXT PRIMARY KEY, agent_id TEXT NOT NULL, locked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), FOREIGN KEY (agent_id) REFERENCES agents(id));
-CREATE TABLE IF NOT EXISTS checkpoints (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), message TEXT NOT NULL, FOREIGN KEY (agent_id) REFERENCES agents(id));
-CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
-CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON checkpoints(agent_id);
-INSERT OR REPLACE INTO mission (id, stage, mission, started_at, updated_at) VALUES (1, '{stage}', '{mission}', strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'));
-SQL
+codex-agent mission init "{mission_description}" --stage "{stage}" --dir "{cwd}"
 ```
+
+This replaces the previous manual `mkdir` + sqlite3 heredoc approach. The command is idempotent — safe to run on existing databases (tables use IF NOT EXISTS, mission row uses INSERT OR REPLACE).
 
 ## 6. Spawning Agents — Mandatory Prompt Template
 
-Every agent prompt MUST include the **Mission Context Header** below. This is NON-NEGOTIABLE. Claude uses this exact template every time, filling in only the bracketed placeholders. No improvisation. No shortcuts. No "simplified" versions.
+Every agent prompt MUST include the **Mission Context** and **Task** blocks below. Claude uses this template every time, filling in the bracketed placeholders. No improvisation.
+
+**Design principle: maximize coding turns.** Codex agents have a limited turn budget (not configurable). Every sqlite3 call, file read, or status update costs a turn. The template is designed so agents spend nearly ALL turns writing code.
+
+- Claude pre-injects all mission context as plain text (agents run ZERO read queries)
+- Claude pre-locks files before spawning (agents run ZERO file lock commands)
+- Agents report completion with a single sqlite3 heredoc (1 turn, not 3+)
+- No checkpoint writes during work (Claude monitors via `codex-agent capture`)
 
 ### The Template
 
-**CRITICAL: Use file-based prompts to avoid shell quoting issues.** The agent prompt contains sqlite3 commands with nested single quotes, double quotes, and JSON arrays. Passing this inline as `codex-agent start "..."` causes bash quoting failures. Instead:
+**CRITICAL: Use file-based prompts to avoid shell quoting issues.** Write the prompt to `_codex/prompt-{agentId}.txt` using the Write tool, then spawn with `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files"`.
 
-1. Write the prompt to `_codex/prompt-{agentId}.txt` using the Write tool
-2. Spawn with: `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files"`
+**Before writing the prompt file**, Claude MUST:
+
+1. Read the current mission context (single structured command replaces 3 separate SELECT queries):
+```bash
+codex-agent mission status --json --dir "{cwd}"
+```
+This returns mission state, all agents, file locks, and recent events in one machine-parseable JSON response.
+
+2. Pre-lock the agent's files and register the agent:
+```bash
+sqlite3 _codex/state.db <<SQL
+INSERT INTO agents (id, task, sandbox) VALUES ('{jobId}', '{task}', '{sandbox}');
+INSERT INTO events (type, source, message) VALUES ('agent_spawn', 'claude', 'Spawned agent {jobId} for: {task}');
+UPDATE agents SET status='running' WHERE id='{jobId}';
+INSERT INTO events (type, source, message) VALUES ('agent_start', 'claude', 'Agent {jobId} started');
+INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('{file1}', '{jobId}');
+INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('{file2}', '{jobId}');
+SQL
+```
+
+3. Generate the formatted mission context block for the prompt file:
+```bash
+CONTEXT=$(codex-agent mission context --dir "{cwd}")
+```
+This produces a pre-formatted text block containing the mission state, agent statuses, file locks, and recent events — ready to embed directly into the prompt. Replaces manually formatting the agents table and file locks.
+
+4. Write the prompt file using the `$CONTEXT` output and the template below.
 
 **Prompt file template** (write this to `_codex/prompt-{agentId}.txt`):
 
 ```
-=== MISSION CONTEXT (read before starting) ===
+=== MISSION CONTEXT (pre-loaded by orchestrator — do not query the database) ===
+{output of: codex-agent mission context --dir "{cwd}"}
 
-Before you begin, run ALL of these commands to understand the current mission state:
-
-sqlite3 -header -column _codex/state.db "SELECT stage, mission, progress, blockers, next_steps FROM mission WHERE id=1;"
-sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified FROM agents ORDER BY rowid;"
-sqlite3 -header -column _codex/state.db "SELECT timestamp, type, message FROM events WHERE source='claude' ORDER BY id DESC LIMIT 10;"
-sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
-sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 15;"
-
-Read the output carefully. Understand:
-1. What is the overall mission and what stage it is in
-2. What other agents have already done (completed) or are currently doing (running)
-3. What decisions Claude has made recently
-4. Which files are currently LOCKED by other agents — do NOT touch locked files
-5. What progress other agents have reported via checkpoints
-
-Do NOT redo work that completed agents already finished.
-Do NOT modify files that are locked by other agents.
-
-Then mark yourself as running:
-
-sqlite3 _codex/state.db "UPDATE agents SET status='running' WHERE id='[jobId]';"
-sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_start', 'agent-[jobId]', 'Starting: [task summary]');"
+This block is generated by `codex-agent mission context` and contains:
+- Mission description, stage, and progress
+- Other agents and their statuses
+- Files locked by other agents (DO NOT modify these)
+- Recent orchestrator decisions and events
 
 === YOUR TASK ===
 
@@ -531,49 +621,34 @@ WORKSPACE: [cwd]
 
 YOUR AGENT ID: [jobId]
 
+YOUR FILES (pre-locked for you by orchestrator):
+- [file1]
+- [file2]
+
 CONSTRAINTS:
-- Only modify these files: [list specific files]
-- Follow existing code patterns
+- Only modify the files listed in YOUR FILES above
+- Follow existing code patterns and conventions
 - Do not modify files outside your scope
-[If research/review task: - IMPORTANT: Do NOT modify any source code files. Your task is to READ, ANALYZE, and REPORT only. The only files you may write to are _codex/state.db (via sqlite3) and _codex/reviews/ (if review).]
+- Do not query _codex/state.db — all context is provided above
+[If research/review task: - IMPORTANT: Do NOT modify any source code files. Your task is to READ, ANALYZE, and REPORT only. Write findings to _codex/reviews/codex-{focus}.md in markdown format.]
+[If UI work: - Build production-grade UI. Use refined typography, spacing, micro-interactions, and visual hierarchy. The result should look like a shipped SaaS product, not a prototype.]
 
-[If UI work: Build production-grade UI. Use refined typography, spacing, micro-interactions, and visual hierarchy. The result should look like a shipped SaaS product, not a prototype.]
+=== WHEN DONE ===
 
-=== BEFORE YOU START CODING ===
+After completing your task, run this single command to report completion.
+IMPORTANT: Escape single quotes in your summary by doubling them: ' becomes ''
 
-Claim the files you will modify so other agents avoid them:
+sqlite3 _codex/state.db <<'DONE'
+UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='[FILES_JSON_ARRAY]', summary='[2-3 sentence summary]' WHERE id='[jobId]';
+INSERT INTO events (type, source, message) VALUES ('agent_complete', 'agent-[jobId]', 'Completed: [one-line summary]');
+DONE
 
-sqlite3 _codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file1]', '[jobId]');"
-sqlite3 _codex/state.db "INSERT OR IGNORE INTO file_locks (file_path, agent_id) VALUES ('[file2]', '[jobId]');"
+If you FAIL or cannot complete the task:
 
-(Run one INSERT per file you plan to modify. INSERT OR IGNORE means it will not fail if another agent already claimed it — in that case, do NOT modify that file.)
-
-=== DURING YOUR WORK ===
-
-After completing each significant step, write a checkpoint:
-
-sqlite3 _codex/state.db "INSERT INTO checkpoints (agent_id, message) VALUES ('[jobId]', '[what you just finished]');"
-
-Write a checkpoint after each file you create or major change you make.
-
-=== WHEN YOU ARE DONE ===
-
-IMPORTANT: If your summary contains single quotes, escape them by doubling: replace ' with ''
-
-After completing your task, run ALL of these commands:
-
-sqlite3 _codex/state.db "UPDATE agents SET status='completed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), files_modified='[LIST_FILES_YOU_MODIFIED]', summary='[2-3 sentence summary of what you did]' WHERE id='[jobId]';"
-sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('agent_complete', 'agent-[jobId]', 'Completed: [one-line summary]', '[list key files modified]');"
-sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='[jobId]';"
-
-Replace [LIST_FILES_YOU_MODIFIED] with a JSON array (e.g. '["src/auth.ts", "src/types.ts"]').
-The DELETE releases your file locks so subsequent agents can modify those files.
-
-If you FAIL or cannot complete the task, run instead:
-
-sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[reason for failure]' WHERE id='[jobId]';"
-sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VALUES ('agent_fail', 'agent-[jobId]', 'Failed: [reason]', '[error details]');"
-sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='[jobId]';"
+sqlite3 _codex/state.db <<'FAIL'
+UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[reason for failure]' WHERE id='[jobId]';
+INSERT INTO events (type, source, message) VALUES ('agent_fail', 'agent-[jobId]', 'Failed: [reason]');
+FAIL
 ```
 
 **Spawning command** (after writing the prompt file):
@@ -584,23 +659,45 @@ codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files/
 
 ### After Spawning
 
-Claude MUST register the agent in the database immediately after spawning:
+Claude has already registered the agent and pre-locked files (Step 2 above). No additional post-spawn DB writes needed. Proceed to spawn the next agent or begin monitoring.
+
+After spawning all agents, monitor with:
 
 ```bash
-sqlite3 _codex/state.db "INSERT INTO agents (id, task, sandbox) VALUES ('{jobId}', '{task}', '{sandbox}');"
-sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_spawn', 'claude', 'Spawned agent {jobId} for: {task}');"
+codex-agent jobs --json
+codex-agent mission status --json --dir "{cwd}"
+```
+
+When agents complete or fail, locks are auto-released by the runtime. Use `codex-agent mission reconcile --dir "{cwd}"` to clean up any stale state (dead agents marked failed, orphan locks released).
+
+### File Lock Cleanup
+
+Claude handles lock cleanup — agents do NOT run DELETE on file_locks. After an agent completes or fails (detected via `codex-agent jobs --json` or `refreshJobStatus`), Claude releases locks:
+
+```bash
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{jobId}';"
+```
+
+If an agent fails to self-report (no status update in state.db), Claude runs the fallback:
+
+```bash
+sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='Did not self-report. Marked failed by Claude.' WHERE id='{jobId}';"
+sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_fail', 'claude', 'Agent {jobId} did not self-report. Marked failed.');"
+sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{jobId}';"
 ```
 
 ### Template Rules (STRICT)
 
-1. **ALWAYS use file-based prompts.** Write the prompt to `_codex/prompt-{agentId}.txt` using the Write tool, then spawn with `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" ...`. NEVER pass the template inline as a string argument — the nested sqlite3 quotes (single quotes inside double quotes inside shell arguments) cause bash parsing failures.
-2. **Every agent gets the full template.** All 5 sections: MISSION CONTEXT, YOUR TASK, BEFORE YOU START CODING, DURING YOUR WORK, WHEN YOU ARE DONE. No exceptions.
-3. **The sqlite3 commands are verbatim.** Do not paraphrase, simplify, or omit any query.
-4. **All 5 read queries in MISSION CONTEXT are mandatory.** Mission, agents, events, file_locks, checkpoints. All five, every time.
-5. **Claude fills in ONLY the bracketed parts** (`[Specific task description]`, `[cwd]`, `[list specific files]`, `[jobId]`, `[file1]`, `[file2]`). The rest is copy-paste.
-6. **For review agents**, omit BEFORE YOU START CODING (no file locks needed for source files), and append: `Write your findings to _codex/reviews/codex-{focus}.md in markdown format. Do NOT modify any source code files.` Do NOT use `-s read-only` — review agents need write access to `_codex/reviews/` and `_codex/state.db`.
-7. **For UI work**, include the production-grade UI line. For non-UI work, omit it.
-8. **File lock INSERTs** — Claude fills in the exact file paths. One INSERT per file.
+1. **ALWAYS use file-based prompts.** Write to `_codex/prompt-{agentId}.txt`, spawn with `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" ...`. NEVER inline the template.
+2. **Every agent gets the full template.** All 3 sections: MISSION CONTEXT, YOUR TASK, WHEN DONE.
+3. **Claude pre-injects ALL context.** Agents NEVER run sqlite3 SELECT queries. The mission state, agent list, locked files, and decisions are embedded as plain text by Claude.
+4. **Claude pre-locks ALL files.** Before writing the prompt, Claude INSERTs file locks for every file the agent will modify. Agents NEVER run INSERT INTO file_locks.
+5. **Claude handles lock cleanup.** After agent completion/failure, Claude DELETEs the agent's file locks. Agents NEVER run DELETE FROM file_locks.
+6. **Agents report completion with a single heredoc.** One sqlite3 call with UPDATE + INSERT. That's it. No other DB writes during the agent's lifetime.
+7. **No checkpoint writes.** Claude monitors agent progress via `codex-agent capture <id>`. Checkpoints waste turns for marginal coordination value.
+8. **For review agents**, omit YOUR FILES section. Add: `Write your findings to _codex/reviews/codex-{focus}.md. Do NOT modify source code.`
+9. **For UI work**, include the production-grade UI constraint. For non-UI work, omit it.
+10. **Claude fills in ONLY the bracketed parts.** `[mission description]`, `[task]`, `[cwd]`, `[jobId]`, `[file1]`, `[file2]`, etc. The structure is fixed.
 
 ## 7. CLI Reference & Monitoring
 
@@ -626,7 +723,17 @@ codex-agent output <id>          # full output
 codex-agent watch <id>           # live stream
 ```
 
-**SQLite status (agent self-reported):**
+**Mission & state commands (structured, machine-parseable):**
+
+```bash
+codex-agent mission status --json --dir "{cwd}"   # full mission state: mission, agents, locks, events
+codex-agent mission reconcile --dir "{cwd}"        # auto-mark dead agents as failed, release their locks
+codex-agent locks list --dir "{cwd}"               # list all active file locks
+codex-agent locks release {agentId} --dir "{cwd}"  # manually release locks for a specific agent
+codex-agent resume {jobId}                         # resume a failed non-ephemeral agent
+```
+
+**SQLite status (agent self-reported — use when controller commands are insufficient):**
 
 ```bash
 sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
@@ -647,13 +754,7 @@ sqlite3 _codex/state.db "UPDATE mission SET progress='3 of 5 agents complete', u
 sqlite3 _codex/state.db "UPDATE mission SET stage='completed', progress='All agents complete', summary='[2-5 paragraph summary: what was built, agent breakdown, files changed, review findings, outstanding items]', updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=1;"
 ```
 
-**Fallback (agent didn't self-report):**
-
-```bash
-sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='Did not self-report. Marked failed by Claude.' WHERE id='{jobId}';"
-sqlite3 _codex/state.db "INSERT INTO events (type, source, message) VALUES ('agent_fail', 'claude', 'Agent {jobId} did not self-report. Marked failed by Claude.');"
-sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{jobId}';"
-```
+**Fallback (agent didn't self-report):** See Section 6 "File Lock Cleanup" for the full fallback sequence.
 
 ### Control
 
@@ -725,6 +826,34 @@ Additionally, review agents need to write findings to `_codex/reviews/`, which a
 - Agents MUST escape single quotes in SQL values: replace `'` with `''`.
 - Example: `SUMMARY=$(echo "$SUMMARY" | sed "s/'/''/g")`
 
+### Execution Mode: Ephemeral vs Persistent
+
+Agents can run in two modes controlled by the `--ephemeral` flag:
+
+**Ephemeral (default):** Session data is not persisted. Best for:
+- Quick research or review tasks (< 10 min expected)
+- Tasks where retry-from-scratch is acceptable
+- Running many parallel agents where disk space matters
+
+**Persistent (omit --ephemeral):** Session is saved to disk and can be resumed. Best for:
+- Complex implementation tasks (> 10 min expected)
+- High-value tasks where partial progress should be recoverable
+- Tasks operating on large codebases where re-reading context is expensive
+
+To start a persistent agent:
+
+```bash
+codex-agent start "prompt" --no-ephemeral
+```
+
+To resume a failed persistent agent:
+
+```bash
+codex-agent resume <jobId>
+```
+
+Claude decides per-agent based on task complexity. Default to ephemeral unless the task is complex enough to warrant recovery support.
+
 ## 9. Error Recovery
 
 ### Agent Fails
@@ -732,25 +861,44 @@ Additionally, review agents need to write findings to `_codex/reviews/`, which a
 1. Check what happened:
    ```bash
    codex-agent events <id>
+   codex-agent capture <id>
    ```
-2. Update the database (if agent didn't self-report):
+2. Mark failed and release locks (Claude handles all DB writes — see Section 6 "File Lock Cleanup"):
    ```bash
-   sqlite3 _codex/state.db "UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id='{id}';"
-   sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{id}';"
+   sqlite3 _codex/state.db <<SQL
+   UPDATE agents SET status='failed', completed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'), summary='[failure reason from events]' WHERE id='{id}';
+   INSERT INTO events (type, source, message) VALUES ('agent_fail', 'claude', 'Agent {id} failed: [reason]');
+   DELETE FROM file_locks WHERE agent_id='{id}';
+   SQL
    ```
-3. Decide: retry with adjusted prompt (max 2 retries), or skip and inform user.
+   Alternatively, to manually release locks for a specific agent:
+   ```bash
+   codex-agent locks release {agentId} --dir "{cwd}"
+   ```
+   To resume a failed persistent (non-ephemeral) agent instead of retrying from scratch:
+   ```bash
+   codex-agent resume {jobId}
+   ```
+3. Decide: retry with adjusted prompt (max 2 retries), resume if persistent, or skip and inform user.
 
 ### Post-Compaction Recovery
 
-After Claude's context compacts, immediately:
+After Claude's context compacts, immediately recover state with:
 
-1. `sqlite3 -header -column _codex/state.db "SELECT * FROM mission;"` — orchestration state
-2. `sqlite3 -header -column _codex/state.db "SELECT * FROM agents;"` — agent statuses
-3. `sqlite3 -header -column _codex/state.db "SELECT * FROM events WHERE source='claude' ORDER BY id;"` — past decisions
-4. `sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"` — active file claims
-5. `sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"` — recent progress
-6. Run `codex-agent jobs --json` for live agent processes
-7. Resume from database state — `_codex/state.db` is your continuity mechanism
+```bash
+# 1. Live agent processes
+codex-agent jobs --json
+
+# 2. Full mission state (mission, agents, locks, events — all in one call)
+codex-agent mission status --json --dir "{cwd}"
+
+# 3. Reconcile dead agents (auto-marks failed, releases their locks)
+codex-agent mission reconcile --dir "{cwd}"
+```
+
+The `mission status --json` command replaces the 4 separate sqlite3 SELECT queries previously needed. The `mission reconcile` command automatically detects agents whose processes died without self-reporting, marks them as failed, and releases their file locks — eliminating the need for manual fallback sqlite3 heredocs.
+
+Resume from the combined output — `_codex/state.db` is your continuity mechanism.
 
 ### Concurrent Agent Interference
 

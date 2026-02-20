@@ -1,11 +1,13 @@
 // Job management for async codex agent execution with codex exec --json
 
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync, statSync } from "fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync, statSync, existsSync } from "fs";
 import { join } from "path";
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
+import { openDb, releaseFileLocks, updateAgentStatus, insertEvent } from "./controller/stateStore.ts";
 import { randomBytes } from "crypto";
 import {
   startExec,
+  resumeExec,
   isRunning,
   killProcess,
   getStoredPid,
@@ -15,6 +17,7 @@ import {
   detectCompletion,
   extractFilesModified,
   extractTokenUsage,
+  extractSessionId,
 } from "./exec.ts";
 
 export interface Job {
@@ -32,6 +35,8 @@ export interface Job {
   pid?: number;
   tokensUsed?: { input: number; output: number };
   filesModified?: string[];
+  sessionId?: string;
+  ephemeral?: boolean;
   error?: string;
 }
 
@@ -150,6 +155,30 @@ function extractSummary(jobId: string): string | null {
   return summary;
 }
 
+/**
+ * Best-effort cleanup of agent state in _codex/state.db when a job fails.
+ * This is defensive: the catch block is intentional because state.db cleanup
+ * must never break the job lifecycle. state.db may not exist, the agent may
+ * not be registered in it (not all jobs are orchestrated), or the DB could
+ * be corrupted. The job lifecycle in jobs.ts is the primary system;
+ * state.db cleanup is secondary and best-effort only.
+ */
+function tryCleanupAgentState(jobId: string, cwd: string, status: string, reason?: string): void {
+  const dbPath = join(cwd, "_codex", "state.db");
+  if (!existsSync(dbPath)) return;
+
+  try {
+    const db = openDb(dbPath);
+    updateAgentStatus(db, jobId, status, reason);
+    releaseFileLocks(db, jobId);
+    insertEvent(db, "agent_cleanup", "runtime", `Auto-cleanup for agent ${jobId}: ${status}`);
+    db.close();
+  } catch {
+    // state.db may not have this agent registered — that's fine, not all jobs are orchestrated.
+    // This catch is intentional: job lifecycle must never fail due to state.db issues.
+  }
+}
+
 export type JobsJsonEntry = {
   id: string;
   status: Job["status"];
@@ -251,6 +280,7 @@ export interface StartJobOptions {
   sandbox?: SandboxMode;
   parentSessionId?: string;
   cwd?: string;
+  ephemeral?: boolean;
 }
 
 export function startJob(options: StartJobOptions): Job {
@@ -267,6 +297,7 @@ export function startJob(options: StartJobOptions): Job {
     reasoningEffort: options.reasoningEffort || config.defaultReasoningEffort,
     sandbox: options.sandbox || config.defaultSandbox,
     parentSessionId: options.parentSessionId,
+    ephemeral: options.ephemeral !== false, // default true
     cwd,
     createdAt: new Date().toISOString(),
   };
@@ -281,6 +312,7 @@ export function startJob(options: StartJobOptions): Job {
     reasoningEffort: job.reasoningEffort,
     sandbox: job.sandbox,
     cwd,
+    ephemeral: job.ephemeral,
   });
 
   if (result.success) {
@@ -290,6 +322,58 @@ export function startJob(options: StartJobOptions): Job {
   } else {
     job.status = "failed";
     job.error = result.error || "Failed to start codex exec";
+    job.completedAt = new Date().toISOString();
+  }
+
+  saveJob(job);
+  return job;
+}
+
+export interface ResumeJobOptions {
+  originalJobId: string;
+  sessionId: string;
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  sandbox: SandboxMode;
+  cwd: string;
+}
+
+export function startResumeJob(options: ResumeJobOptions): Job {
+  ensureJobsDir();
+  const jobId = generateJobId();
+
+  const job: Job = {
+    id: jobId,
+    status: "pending",
+    prompt: `[RESUMED from ${options.originalJobId}]`,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    sandbox: options.sandbox,
+    parentSessionId: options.originalJobId,
+    sessionId: options.sessionId,
+    ephemeral: false,
+    cwd: options.cwd,
+    createdAt: new Date().toISOString(),
+  };
+
+  saveJob(job);
+
+  const result = resumeExec({
+    jobId,
+    sessionId: options.sessionId,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    sandbox: options.sandbox,
+    cwd: options.cwd,
+  });
+
+  if (result.success) {
+    job.status = "running";
+    job.startedAt = new Date().toISOString();
+    job.pid = result.pid;
+  } else {
+    job.status = "failed";
+    job.error = result.error || "Failed to resume codex exec";
     job.completedAt = new Date().toISOString();
   }
 
@@ -311,6 +395,7 @@ export function killJob(jobId: string): boolean {
   job.error = "Killed by user";
   job.completedAt = new Date().toISOString();
   saveJob(job);
+  tryCleanupAgentState(jobId, job.cwd, "failed", "Killed by user");
   return true;
 }
 
@@ -365,8 +450,8 @@ export function refreshJobStatus(jobId: string): Job | null {
   // Check JSONL for completion events
   const completionStatus = detectCompletion(jobId);
 
-  if (completionStatus === "completed" || (!processAlive && completionStatus !== "failed")) {
-    // Process exited or JSONL shows completion
+  if (completionStatus === "completed") {
+    // Explicit success terminal event in JSONL
     job.status = "completed";
     job.completedAt = new Date().toISOString();
 
@@ -376,19 +461,33 @@ export function refreshJobStatus(jobId: string): Job | null {
     if (tokens) job.tokensUsed = tokens;
     const files = extractFilesModified(events);
     if (files.length > 0) job.filesModified = files;
+    if (!job.sessionId) {
+      const sid = extractSessionId(events);
+      if (sid) job.sessionId = sid;
+    }
 
     saveJob(job);
   } else if (completionStatus === "failed") {
     job.status = "failed";
     job.completedAt = new Date().toISOString();
     job.error = "Agent task failed";
+    if (!job.sessionId) {
+      const sid = extractSessionId(getAllEvents(jobId));
+      if (sid) job.sessionId = sid;
+    }
     saveJob(job);
+    tryCleanupAgentState(jobId, job.cwd, "failed", job.error);
   } else if (!processAlive) {
-    // Process died without completion event
+    // Process died without explicit success terminal event — always treat as failure
     job.status = "failed";
     job.completedAt = new Date().toISOString();
-    job.error = "Process exited unexpectedly";
+    job.error = "process_exit_no_success_event";
+    if (!job.sessionId) {
+      const sid = extractSessionId(getAllEvents(jobId));
+      if (sid) job.sessionId = sid;
+    }
     saveJob(job);
+    tryCleanupAgentState(jobId, job.cwd, "failed", job.error);
   } else if (isInactiveTimedOut(job)) {
     // Still running but no activity for too long
     if (pid) killProcess(pid);
@@ -396,6 +495,7 @@ export function refreshJobStatus(jobId: string): Job | null {
     job.error = `Timed out after ${config.defaultTimeout} minutes of inactivity`;
     job.completedAt = new Date().toISOString();
     saveJob(job);
+    tryCleanupAgentState(jobId, job.cwd, "failed", job.error);
   }
 
   return loadJob(jobId);

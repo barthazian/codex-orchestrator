@@ -6,6 +6,7 @@
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import {
   startJob,
+  startResumeJob,
   loadJob,
   listJobs,
   killJob,
@@ -18,7 +19,27 @@ import {
   getJobsJson,
 } from "./jobs.ts";
 import { loadFiles, formatPromptWithFiles, estimateTokens, loadCodebaseMap } from "./files.ts";
-import { isCodexAvailable, getCodexVersion, getEvents, formatEvent } from "./exec.ts";
+import { isCodexAvailable, getCodexVersion, getEvents, formatEvent, isRunning, getStoredPid } from "./exec.ts";
+import {
+  openDb,
+  initSchema,
+  getMission,
+  getAgents,
+  getFileLocks,
+  getRecentEvents,
+  registerAgent,
+  setAgentRunning,
+  acquireFileLocks,
+  releaseFileLocks,
+  updateAgentStatus,
+  insertEvent,
+  generateMissionContext,
+  getFindings,
+  getReviewSummary,
+  updateFindingStatus,
+} from "./controller/stateStore.ts";
+import { join } from "path";
+import { mkdirSync } from "fs";
 
 const HELP = `
 Codex Agent - Delegate tasks to GPT Codex agents (codex exec --json)
@@ -32,8 +53,20 @@ Usage:
   codex-agent watch <jobId>              Stream output updates
   codex-agent jobs [--json]              List all jobs
   codex-agent kill <jobId>               Kill running job
+  codex-agent resume <jobId>              Resume a failed persistent job
   codex-agent clean                      Clean old completed jobs
   codex-agent health                     Check codex availability
+  codex-agent mission init "desc" [--stage s] Initialize mission database
+  codex-agent mission status [--json]         Show mission state
+  codex-agent mission reconcile               Reconcile dead agents
+  codex-agent mission context                 Generate agent prompt context
+  codex-agent locks list                      List all file locks
+  codex-agent locks release <agentId>         Release locks for agent
+  codex-agent review gate                     Run deterministic quality gate (tsc/test/lint)
+  codex-agent review findings [--json]        List review findings from state.db
+  codex-agent review summary                  Show review summary stats
+  codex-agent review dismiss <id>             Dismiss a finding
+  codex-agent review confirm <id>             Confirm a finding
 
 Options:
   -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
@@ -42,6 +75,7 @@ Options:
   -f, --file <glob>          Include files matching glob (can repeat)
   -d, --dir <path>           Working directory (default: cwd)
   --parent-session <id>      Parent session ID for linkage
+  --no-ephemeral             Use persistent session (enables resume)
   --map                      Include codebase map if available
   --dry-run                  Show prompt without executing
   --json                     Output JSON (jobs command only)
@@ -71,10 +105,13 @@ interface Options {
   dir: string;
   includeMap: boolean;
   parentSessionId: string | null;
+  ephemeral: boolean | undefined;
   dryRun: boolean;
   json: boolean;
   jobsLimit: number | null;
   jobsAll: boolean;
+  stage: string;
+  dbPath: string | null;
 }
 
 function parseArgs(args: string[]): {
@@ -90,10 +127,13 @@ function parseArgs(args: string[]): {
     dir: process.cwd(),
     includeMap: false,
     parentSessionId: null,
+    ephemeral: undefined,
     dryRun: false,
     json: false,
     jobsLimit: config.jobsListLimit,
     jobsAll: false,
+    stage: "planning",
+    dbPath: null,
   };
 
   const positional: string[] = [];
@@ -147,6 +187,12 @@ function parseArgs(args: string[]): {
       options.jobsLimit = Math.floor(parsed);
     } else if (arg === "--all") {
       options.jobsAll = true;
+    } else if (arg === "--stage") {
+      options.stage = args[++i];
+    } else if (arg === "--db") {
+      options.dbPath = args[++i];
+    } else if (arg === "--no-ephemeral") {
+      options.ephemeral = false;
     } else if (!arg.startsWith("-")) {
       if (!command) {
         command = arg;
@@ -293,6 +339,7 @@ async function main() {
         sandbox: options.sandbox,
         parentSessionId: options.parentSessionId ?? undefined,
         cwd: options.dir,
+        ephemeral: options.ephemeral,
       });
 
       console.log(`Job started: ${job.id}`);
@@ -506,6 +553,297 @@ async function main() {
       break;
     }
 
+    case "resume": {
+      if (positional.length === 0) {
+        console.error("Error: No job ID provided");
+        process.exit(1);
+      }
+
+      const originalJob = loadJob(positional[0]);
+      if (!originalJob) {
+        console.error(`Job ${positional[0]} not found`);
+        process.exit(1);
+      }
+
+      if (!originalJob.sessionId) {
+        console.error(`Job ${positional[0]} has no session ID (was it ephemeral?)`);
+        console.error("Only non-ephemeral jobs can be resumed.");
+        process.exit(1);
+      }
+
+      if (originalJob.status === "running") {
+        console.error(`Job ${positional[0]} is still running`);
+        process.exit(1);
+      }
+
+      if (!isCodexAvailable()) {
+        console.error("Error: codex CLI is required but not installed");
+        process.exit(1);
+      }
+
+      const newJob = startResumeJob({
+        originalJobId: positional[0],
+        sessionId: originalJob.sessionId,
+        model: originalJob.model,
+        reasoningEffort: originalJob.reasoningEffort,
+        sandbox: originalJob.sandbox,
+        cwd: originalJob.cwd,
+      });
+
+      console.log(`Resuming job ${positional[0]} as ${newJob.id}`);
+      console.log(`Session: ${originalJob.sessionId}`);
+      if (newJob.pid) console.log(`PID: ${newJob.pid}`);
+      console.log(`Events: codex-agent events ${newJob.id}`);
+      break;
+    }
+
+    case "mission": {
+      const subCmd = positional[0];
+      const dbPath = options.dbPath || join(options.dir, "_codex", "state.db");
+
+      if (subCmd === "init") {
+        const description = positional.slice(1).join(" ");
+        if (!description) {
+          console.error("Error: No mission description provided");
+          console.error('Usage: codex-agent mission init "description" [--stage stage]');
+          process.exit(1);
+        }
+        // Ensure _codex dir exists
+        mkdirSync(join(options.dir, "_codex"), { recursive: true });
+        const db = openDb(dbPath);
+        initSchema(db);
+        db.prepare("INSERT OR REPLACE INTO mission (id, stage, mission, started_at, updated_at) VALUES (1, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now'))").run(options.stage, description);
+        insertEvent(db, "mission_init", "claude", `Mission initialized: ${description}`);
+        db.close();
+        console.log(`Mission initialized: ${description}`);
+        console.log(`Stage: ${options.stage}`);
+        console.log(`DB: ${dbPath}`);
+      } else if (subCmd === "status") {
+        const db = openDb(dbPath);
+        const mission = getMission(db);
+        const agents = getAgents(db);
+        const locks = getFileLocks(db);
+        const events = getRecentEvents(db, 10);
+
+        if (options.json) {
+          console.log(JSON.stringify({ mission, agents, locks, events }, null, 2));
+        } else {
+          if (mission) {
+            console.log(`Mission: ${mission.mission}`);
+            console.log(`Stage: ${mission.stage}`);
+          } else {
+            console.log("No active mission");
+          }
+          console.log("");
+          console.log("Agents:");
+          if (agents.length === 0) {
+            console.log("  (none)");
+          } else {
+            for (const a of agents) {
+              console.log(`  ${a.id}  ${a.status.padEnd(10)}  ${a.task}`);
+            }
+          }
+          console.log("");
+          console.log("File Locks:");
+          if (locks.length === 0) {
+            console.log("  (none)");
+          } else {
+            for (const l of locks) {
+              console.log(`  ${l.file_path} -> ${l.agent_id}`);
+            }
+          }
+          console.log("");
+          console.log("Recent Events:");
+          for (const e of events) {
+            console.log(`  [${e.type}] ${e.source}: ${e.message || ""}`);
+          }
+        }
+        db.close();
+      } else if (subCmd === "reconcile") {
+        const db = openDb(dbPath);
+        const agents = getAgents(db);
+        let reconciled = 0;
+        for (const agent of agents) {
+          if (agent.status !== "running") continue;
+          // Check if the agent's job is still alive by looking up the PID
+          const storedPid = getStoredPid(agent.id);
+          if (storedPid && isRunning(storedPid)) continue;
+          // Agent is dead — mark failed and release locks
+          updateAgentStatus(db, agent.id, "failed", "Reconciled: process no longer running");
+          const released = releaseFileLocks(db, agent.id);
+          insertEvent(db, "reconcile", "claude", `Reconciled agent ${agent.id}: marked failed, released ${released} locks`);
+          reconciled++;
+        }
+        db.close();
+        console.log(`Reconciled ${reconciled} dead agents`);
+      } else if (subCmd === "context") {
+        const db = openDb(dbPath);
+        console.log(generateMissionContext(db));
+        db.close();
+      } else {
+        console.error(`Unknown mission subcommand: ${subCmd}`);
+        console.error("Available: init, status, reconcile, context");
+        process.exit(1);
+      }
+      break;
+    }
+
+    case "locks": {
+      const subCmd = positional[0];
+      const dbPath = options.dbPath || join(options.dir, "_codex", "state.db");
+
+      if (subCmd === "list") {
+        const db = openDb(dbPath);
+        const locks = getFileLocks(db);
+        if (locks.length === 0) {
+          console.log("No file locks");
+        } else {
+          console.log("FILE                          AGENT       SINCE");
+          console.log("-".repeat(60));
+          for (const l of locks) {
+            console.log(`${l.file_path.padEnd(30)} ${l.agent_id.padEnd(12)} ${l.locked_at}`);
+          }
+        }
+        db.close();
+      } else if (subCmd === "release") {
+        const agentId = positional[1];
+        if (!agentId) {
+          console.error("Error: No agent ID provided");
+          console.error("Usage: codex-agent locks release <agentId>");
+          process.exit(1);
+        }
+        const db = openDb(dbPath);
+        const count = releaseFileLocks(db, agentId);
+        db.close();
+        console.log(`Released ${count} locks for agent ${agentId}`);
+      } else {
+        console.error(`Unknown locks subcommand: ${subCmd}`);
+        console.error("Available: list, release");
+        process.exit(1);
+      }
+      break;
+    }
+
+    case "review": {
+      const subCmd = positional[0];
+      const dbPath = options.dbPath || join(options.dir, "_codex", "state.db");
+
+      if (subCmd === "gate") {
+        // Deterministic quality gate: run tsc, test, lint
+        // Returns exit code 0 if all pass, 1 if any fail
+        const { spawnSync: spawnGate } = await import("child_process");
+        const checks = [
+          { name: "typecheck", cmd: "bunx", args: ["tsc", "--noEmit"] },
+          { name: "test", cmd: "bun", args: ["test", "--timeout", "30000"] },
+        ];
+
+        let allPassed = true;
+        const results: Array<{ name: string; passed: boolean; output: string }> = [];
+
+        for (const check of checks) {
+          const result = spawnGate(check.cmd, check.args, {
+            cwd: options.dir,
+            encoding: "utf-8",
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 60000,
+          });
+          const passed = result.status === 0;
+          const output = ((result.stderr as string) || (result.stdout as string) || "").trim();
+          results.push({ name: check.name, passed, output });
+          if (!passed) allPassed = false;
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify({ passed: allPassed, checks: results }, null, 2));
+        } else {
+          for (const r of results) {
+            const icon = r.passed ? "✓" : "✗";
+            console.log(`${icon} ${r.name}`);
+            if (!r.passed && r.output) {
+              // Show first 5 lines of error output
+              const lines = r.output.split("\n").slice(0, 5);
+              for (const line of lines) console.log(`  ${line}`);
+            }
+          }
+          console.log("");
+          console.log(allPassed ? "Gate: PASS" : "Gate: FAIL — fix errors before review");
+        }
+
+        // Log to state.db if it exists
+        try {
+          const db = openDb(dbPath);
+          insertEvent(db, "review_gate", "orchestrator", `Deterministic gate: ${allPassed ? "PASS" : "FAIL"}`);
+          db.close();
+        } catch {
+          // state.db may not exist yet
+        }
+
+        if (!allPassed) process.exit(1);
+      } else if (subCmd === "findings") {
+        const db = openDb(dbPath);
+        const findings = getFindings(db, { status: "open" });
+
+        if (options.json) {
+          console.log(JSON.stringify(findings, null, 2));
+        } else if (findings.length === 0) {
+          console.log("No open review findings");
+        } else {
+          for (const f of findings) {
+            const loc = f.line ? `${f.path}:${f.line}` : f.path;
+            console.log(`[${f.id}] ${f.severity.toUpperCase()} (${f.confidence}%) ${f.category} — ${loc}`);
+            console.log(`    ${f.description}`);
+            if (f.suggested_fix) console.log(`    Fix: ${f.suggested_fix}`);
+            console.log(`    Model: ${f.model} | Status: ${f.status}`);
+            console.log("");
+          }
+        }
+        db.close();
+      } else if (subCmd === "summary") {
+        const db = openDb(dbPath);
+        const summary = getReviewSummary(db);
+
+        if (options.json) {
+          console.log(JSON.stringify(summary, null, 2));
+        } else {
+          console.log(`Total findings: ${summary.total}`);
+          console.log(`Confirmed by both models: ${summary.confirmed_by_both}`);
+          console.log("");
+          console.log("By severity:");
+          for (const [k, v] of Object.entries(summary.by_severity)) {
+            console.log(`  ${k}: ${v}`);
+          }
+          console.log("");
+          console.log("By status:");
+          for (const [k, v] of Object.entries(summary.by_status)) {
+            console.log(`  ${k}: ${v}`);
+          }
+          console.log("");
+          console.log("By model:");
+          for (const [k, v] of Object.entries(summary.by_model)) {
+            console.log(`  ${k}: ${v}`);
+          }
+        }
+        db.close();
+      } else if (subCmd === "dismiss" || subCmd === "confirm") {
+        const findingId = parseInt(positional[1], 10);
+        if (!Number.isFinite(findingId)) {
+          console.error("Error: No finding ID provided");
+          process.exit(1);
+        }
+        const db = openDb(dbPath);
+        const newStatus = subCmd === "dismiss" ? "dismissed" : "confirmed";
+        updateFindingStatus(db, findingId, newStatus);
+        insertEvent(db, "review_update", "orchestrator", `Finding ${findingId} ${newStatus}`);
+        db.close();
+        console.log(`Finding ${findingId}: ${newStatus}`);
+      } else {
+        console.error(`Unknown review subcommand: ${subCmd}`);
+        console.error("Available: gate, findings, summary, dismiss, confirm");
+        process.exit(1);
+      }
+      break;
+    }
+
     default:
       // Treat as prompt for start command
       if (command) {
@@ -530,6 +868,7 @@ async function main() {
           sandbox: options.sandbox,
           parentSessionId: options.parentSessionId ?? undefined,
           cwd: options.dir,
+          ephemeral: options.ephemeral,
         });
 
         console.log(`Job started: ${job.id}`);

@@ -55,6 +55,27 @@ plugins/codex-orchestrator/         # the plugin
 - Jobs stored in `~/.codex-agent/jobs/`
 - Each agent runs as a detached `codex exec --json` process
 - JSONL output captured to `<jobId>.jsonl` for event parsing
-- Completion detected via JSONL events or process exit
+- Completion detected via JSONL `turn.completed` event (NOT `task.completed` — that doesn't exist in the Codex CLI protocol)
 - Bun is the TypeScript runtime - never use npm/yarn/pnpm for running
 - Cross-platform: macOS, Linux, Windows (MINGW/Git Bash)
+
+## Codex CLI Event Protocol
+
+- Terminal event: `thread.started → turn.started → item.started/item.completed (×N) → turn.completed`
+- `task.completed`/`response.completed` do NOT exist — `turn.completed` is the terminal success event
+- File changes: `item.completed` with `item.type === "file_change"`, paths in `item.changes[].path`
+- Token usage: inside `turn.completed` event's `usage` field
+- Session ID: `thread_id` field in `thread.started` event
+
+## Windows/MINGW Gotchas
+
+- **PID namespace mismatch**: Bash `$!` returns MINGW PIDs. Bun's `process.kill(pid, 0)` checks Windows native PIDs. They are DIFFERENT namespaces. Use `bash kill -0 <pid>` for process detection, not `process.kill()`.
+- **Codex CLI requires git repo**: `codex exec` fails with "Not inside a trusted directory" unless the target dir has `git init` or `--skip-git-repo-check` is passed.
+- **PowerShell execution policy**: Agents using `npx` may fail because `npx.ps1` is blocked. Prefer `bunx` or direct `bun run`.
+- **bunx tempdir access**: `bunx` may fail with `AccessDenied` on Windows temp directories.
+
+## Key Files (Controller)
+
+| File | Purpose |
+|------|---------|
+| `src/controller/stateStore.ts` | SQLite state management via `bun:sqlite` for multi-agent coordination |

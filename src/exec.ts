@@ -48,6 +48,7 @@ export function startExec(options: {
   reasoningEffort: string;
   sandbox: string;
   cwd: string;
+  ephemeral?: boolean;
 }): StartExecResult {
   mkdirSync(config.jobsDir, { recursive: true });
 
@@ -61,10 +62,12 @@ export function startExec(options: {
 
   try {
     // Build command flags for codex exec --json (prompt passed separately via env var)
-    // --ephemeral prevents session file conflicts when running multiple agents
+    // --ephemeral prevents session file conflicts when running multiple agents.
+    // When ephemeral is false, sessions persist to disk for resume support.
+    const useEphemeral = options.ephemeral !== false; // default true
     const flagArgs = [
       "exec", "--json",
-      "--ephemeral",
+      ...(useEphemeral ? ["--ephemeral"] : []),
       "-m", options.model,
       "-c", `model_reasoning_effort=${options.reasoningEffort}`,
       "-s", options.sandbox,
@@ -115,17 +118,86 @@ export function startExec(options: {
   }
 }
 
+/**
+ * Spawn codex exec resume <sessionId> --json as a detached background process.
+ * Used to resume a persistent (non-ephemeral) session that failed or exited.
+ * Output goes to {jobId}.jsonl, stderr to {jobId}.stderr.
+ * PID is stored in {jobId}.pid for later process management.
+ */
+export function resumeExec(options: {
+  jobId: string;
+  sessionId: string;
+  model: string;
+  reasoningEffort: string;
+  sandbox: string;
+  cwd: string;
+}): StartExecResult {
+  mkdirSync(config.jobsDir, { recursive: true });
+
+  const jsonlPath = getJsonlPath(options.jobId);
+  const stderrPath = getStderrPath(options.jobId);
+  const pidPath = getPidPath(options.jobId);
+
+  try {
+    // Build command flags for codex exec resume <sessionId> --json
+    // No --ephemeral flag — resume requires a persistent session.
+    const flagArgs = [
+      "exec", "resume", options.sessionId, "--json",
+      "-m", options.model,
+      "-c", `model_reasoning_effort=${options.reasoningEffort}`,
+      "-s", options.sandbox,
+      "--full-auto",
+    ];
+
+    // Same shell spawning pattern as startExec — see comments there for rationale.
+    // Resume does not need CODEX_PROMPT since the session already has its prompt.
+    const shellArgs = flagArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+    const shellCmd = `codex ${shellArgs} > '${jsonlPath.replace(/\\/g, "/")}' 2> '${stderrPath.replace(/\\/g, "/")}' & echo $!`;
+
+    const result = spawnSync("bash", ["-c", shellCmd], {
+      cwd: options.cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+
+    if (result.status !== 0) {
+      throw new Error(`Failed to spawn codex resume: ${result.stderr || "unknown error"}`);
+    }
+
+    const pid = parseInt((result.stdout as string).trim(), 10);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      throw new Error(`Failed to get PID from spawn: stdout=${result.stdout}`);
+    }
+
+    writeFileSync(pidPath, String(pid));
+
+    return { pid, jobId: options.jobId, success: true };
+  } catch (err) {
+    return {
+      pid: 0,
+      jobId: options.jobId,
+      success: false,
+      error: (err as Error).message,
+    };
+  }
+}
+
 // --- Process Management ---
 
 /**
  * Check if a process with the given PID is still running.
- * Cross-platform: uses process.kill(pid, 0) signal check.
+ * On MINGW/Git Bash (Windows), process.kill(pid, 0) cannot see MINGW PIDs
+ * because $! returns a MINGW PID while Bun uses Windows native PIDs.
+ * We use bash kill -0 as the primary check to handle both PID namespaces.
  */
 export function isRunning(pid: number): boolean {
   if (!pid || pid <= 0) return false;
   try {
-    process.kill(pid, 0);
-    return true;
+    const result = spawnSync("bash", ["-c", `kill -0 ${pid} 2>/dev/null`], {
+      stdio: "ignore",
+    });
+    return result.status === 0;
   } catch {
     return false;
   }
@@ -133,12 +205,15 @@ export function isRunning(pid: number): boolean {
 
 /**
  * Kill a running process by PID.
+ * Uses bash kill to handle MINGW PID namespace on Windows.
  */
 export function killProcess(pid: number): boolean {
   if (!isRunning(pid)) return false;
   try {
-    process.kill(pid, "SIGTERM");
-    return true;
+    const result = spawnSync("bash", ["-c", `kill ${pid} 2>/dev/null`], {
+      stdio: "ignore",
+    });
+    return result.status === 0;
   } catch {
     return false;
   }
@@ -253,12 +328,25 @@ export function extractFilesModified(events: ExecEvent[]): string[] {
   const files = new Set<string>();
 
   for (const event of events) {
-    // Check for file_change events
+    // Codex CLI format: item.completed with inner item.type === "file_change"
+    // Structure: {"type":"item.completed","item":{"type":"file_change","changes":[{"path":"...","kind":"add|edit|delete"}]}}
+    if (event.type === "item.completed" && isRecord(event.item)) {
+      const item = event.item;
+      if (item.type === "file_change" && Array.isArray(item.changes)) {
+        for (const change of item.changes) {
+          if (isRecord(change) && typeof change.path === "string") {
+            files.add(change.path);
+          }
+        }
+      }
+    }
+
+    // Legacy: top-level file_change events
     if (event.type === "file_change" && typeof event.file === "string") {
       files.add(event.file);
     }
 
-    // Check for apply_patch tool calls in response_item events
+    // Legacy: apply_patch tool calls in response_item events
     if (event.type === "response_item") {
       const payload = isRecord(event.payload) ? event.payload : event;
       const payloadType = typeof payload.type === "string" ? payload.type : null;
@@ -327,15 +415,16 @@ export function extractTokenUsage(events: ExecEvent[]): { input: number; output:
       }
     }
 
-    // Also check turn.completed events
+    // Codex CLI reports per-turn usage in turn.completed events.
+    // For multi-turn sessions, accumulate across turns.
     if (event.type === "turn.completed" || event.type === "response.completed") {
       const usage = isRecord(event.usage) ? event.usage : null;
       if (usage) {
         const input = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
         const output = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
         if (input > 0 || output > 0) {
-          totalInput = input;
-          totalOutput = output;
+          totalInput += input;
+          totalOutput += output;
           found = true;
         }
       }
@@ -345,23 +434,78 @@ export function extractTokenUsage(events: ExecEvent[]): { input: number; output:
   return found ? { input: totalInput, output: totalOutput } : null;
 }
 
+/**
+ * Extract session_id from JSONL events by finding the thread.started event.
+ */
+export function extractSessionId(events: ExecEvent[]): string | null {
+  for (const event of events) {
+    if (event.type !== "thread.started") continue;
+
+    if (typeof event.thread_id === "string") return event.thread_id;
+
+    const payload = isRecord(event.payload) ? event.payload : null;
+    if (payload && typeof payload.thread_id === "string") return payload.thread_id;
+  }
+  return null;
+}
+
 // --- Completion Detection ---
 
 /**
  * Check if a codex exec session has completed based on JSONL events.
  * Returns "completed", "failed", or null (still running).
+ *
+ * The Codex CLI event protocol for single-turn tasks:
+ *   thread.started → turn.started → item.* (×N) → turn.completed → process exits
+ * There is NO task.completed or response.completed in this protocol.
+ * For multi-turn: turn.completed → turn.started → ... → turn.completed.
+ * A turn.started AFTER the last turn.completed means the agent died mid-turn.
  */
 export function detectCompletion(jobId: string): "completed" | "failed" | null {
-  const lastEvent = getLastEvent(jobId);
-  if (!lastEvent) return null;
+  const events = parseJSONL(jobId);
+  if (events.length === 0) return null;
 
-  // Check for explicit completion/failure events
-  if (lastEvent.type === "turn.completed" || lastEvent.type === "task.completed") {
-    return "completed";
+  // Track the last turn-level event and whether a new turn started after it
+  let lastTurnEvent: ExecEvent | null = null;
+  let turnStartedAfterLastComplete = false;
+
+  for (const evt of events) {
+    // Explicit task-level events (may exist in newer CLI versions)
+    if (evt.type === "task.completed" || evt.type === "response.completed") {
+      return "completed";
+    }
+    if (evt.type === "task.failed") {
+      return "failed";
+    }
+
+    // Track turn lifecycle
+    if (evt.type === "turn.completed") {
+      lastTurnEvent = evt;
+      turnStartedAfterLastComplete = false;
+    } else if (evt.type === "turn.failed") {
+      lastTurnEvent = evt;
+      turnStartedAfterLastComplete = false;
+    } else if (evt.type === "turn.started") {
+      if (lastTurnEvent?.type === "turn.completed") {
+        turnStartedAfterLastComplete = true;
+      }
+    }
+
+    // Top-level error event
+    if (evt.type === "error") {
+      return "failed";
+    }
   }
 
-  if (lastEvent.type === "turn.failed" || lastEvent.type === "task.failed" || lastEvent.type === "error") {
-    return "failed";
+  if (!lastTurnEvent) return null;
+
+  if (lastTurnEvent.type === "turn.failed") return "failed";
+
+  if (lastTurnEvent.type === "turn.completed") {
+    // A turn.started after the last turn.completed means agent died mid-turn
+    if (turnStartedAfterLastComplete) return null;
+    // Otherwise the agent completed its last turn cleanly
+    return "completed";
   }
 
   return null;
