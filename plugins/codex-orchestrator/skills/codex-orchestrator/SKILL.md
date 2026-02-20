@@ -20,7 +20,7 @@ triggers:
 USER — sets vision and approves strategy
     |
     v
-CLAUDE (Opus) — strategy, decomposition, coordination, review orchestration
+CLAUDE (default model) — strategy, decomposition, coordination, review orchestration
     |
     ├── Codex agent (task A)   — focused coder
     ├── Codex agent (task B)   — focused coder
@@ -137,7 +137,7 @@ USER'S REQUEST
      |
 5. IMPLEMENTATION  (Claude spawns N workspace-write agents)
      |
-6. REVIEW          (DUAL-MODEL: Codex agents + 5 Claude agents + confidence scoring)
+6. REVIEW          (DUAL-MODEL: Codex agents + 5 Claude agents + orchestrating Claude direct review)
      |
 7. TESTING         (Claude spawns N workspace-write agents)
 ```
@@ -158,7 +158,7 @@ USER'S REQUEST
 
 ### Codebase Map (Auto-Managed)
 
-The `--map` flag injects `docs/CODEBASE_MAP.md` into every agent's prompt, giving them instant architectural context. Without it, agents waste time exploring and guessing at structure.
+The `--map` flag injects `docs/CODEBASE_MAP.md` into every agent's prompt, giving them instant structural context (file layout, module boundaries, data flows). Note: agents already have task and mission clarity from the state.db pre-injection — the map is not a replacement for that, but a complement that reduces codebase exploration overhead on large projects.
 
 **Auto-create at mission start:** Before entering any pipeline stage, check if `docs/CODEBASE_MAP.md` exists. If it does NOT exist, invoke `/cartographer` to generate it. This is a prerequisite — do NOT spawn agents without a map.
 
@@ -338,7 +338,7 @@ For each raw finding, Claude makes a first-principles judgment:
 |---------|---------|--------|
 | **KEEP** | Real issue, confirmed by reading the code. The described behaviour actually occurs at the cited line. | Store in `review_findings` |
 | **DISCARD** | False positive, pre-existing, already caught by gate, or pedantic nitpick. | Drop silently |
-| **ELEVATE** | Flagged by both Codex and a Claude agent independently on the same path/line — highest signal. | Store with `confirmed_by_both = 1` |
+| **ELEVATE** | Flagged by both Codex and a Claude agent independently on the same path/line — highest signal. | Store normally; `confirmed_by_both` is auto-computed by `getReviewSummary()` by matching `path+line+category` across findings where one model contains 'codex' and another contains 'claude' — no manual flag needed. |
 
 **False positives to discard:**
 - Pre-existing issues not introduced by this mission's agents
@@ -549,7 +549,7 @@ sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VAL
 - What files were modified (know what exists)
 - What failed previously (avoid repeating mistakes)
 
-If tables grow excessively large (>1000 rows in checkpoints/events), Claude may ask the user for permission to prune old entries — but NEVER autonomously.
+If tables grow excessively large (>1000 rows in events), Claude may ask the user for permission to prune old entries — but NEVER autonomously.
 
 ### Initialization
 
@@ -740,7 +740,6 @@ codex-agent resume {jobId}                         # resume a failed non-ephemer
 
 ```bash
 sqlite3 -header -column _codex/state.db "SELECT id, task, status, files_modified, summary FROM agents;"
-sqlite3 -header -column _codex/state.db "SELECT agent_id, timestamp, message FROM checkpoints ORDER BY id DESC LIMIT 20;"
 sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_locks;"
 sqlite3 -header -column _codex/state.db "SELECT timestamp, source, message FROM events WHERE type IN ('agent_complete', 'agent_fail') ORDER BY id;"
 ```
@@ -838,7 +837,7 @@ Agents can run in two modes controlled by the `--ephemeral` flag:
 - Tasks where retry-from-scratch is acceptable
 - Running many parallel agents where disk space matters
 
-**Persistent (omit --ephemeral):** Session is saved to disk and can be resumed. Best for:
+**Persistent (--no-ephemeral):** Session is saved to disk and can be resumed. Best for:
 - Complex implementation tasks (> 10 min expected)
 - High-value tasks where partial progress should be recoverable
 - Tasks operating on large codebases where re-reading context is expensive
