@@ -126,6 +126,7 @@ codex-agent events <jobId>
 | Command | Description |
 |---------|-------------|
 | `start <prompt>` | Start a new agent with the given prompt |
+| `resume <jobId>` | Resume a failed persistent job (requires `--no-ephemeral` on original start) |
 | `status <id>` | Check job status and details |
 | `capture <id> [n]` | Get last n lines of output (default: 50) |
 | `output <id>` | Get full session output |
@@ -137,6 +138,17 @@ codex-agent events <jobId>
 | `delete <id>` | Delete a specific job and its files |
 | `clean` | Remove jobs older than 7 days |
 | `health` | Check codex availability |
+| `mission init "desc"` | Initialize `_codex/state.db` for a new orchestration mission |
+| `mission status` | Show current mission stage, agents, and blockers |
+| `mission reconcile` | Mark agents dead if their codex process has exited |
+| `mission context` | Generate pre-injection context block for an agent prompt |
+| `locks list` | List all active file locks in state.db |
+| `locks release <agentId>` | Release all file locks held by an agent |
+| `review gate` | Run deterministic quality gate (tsc / test / lint) |
+| `review findings` | List review findings stored in state.db |
+| `review summary` | Show finding counts by severity and confidence |
+| `review dismiss <id>` | Mark a finding as dismissed |
+| `review confirm <id>` | Confirm a finding as actionable |
 
 ## Options
 
@@ -152,6 +164,7 @@ codex-agent events <jobId>
 | `--limit <n>` | Limit jobs shown (jobs command, default: 20) |
 | `--all` | Show all jobs, ignoring limit |
 | `--parent-session <id>` | Parent session ID for job linkage |
+| `--no-ephemeral` | Use persistent session (enables `resume` after failure) |
 | `--dry-run` | Preview prompt without executing |
 
 ## Jobs JSON Output
@@ -240,25 +253,27 @@ _codex/
 | `agents` | Agent registry (task, status, files modified) | Claude (INSERT), each agent (UPDATE own row) |
 | `events` | Event history (stage changes, agent lifecycle) | Claude + agents |
 | `file_locks` | Prevents concurrent file modification | Agents (claim/release) |
-| `checkpoints` | Agent progress reports during work | Agents |
+| `review_findings` | Code review findings with severity, confidence, suggested fix | Claude + review agents |
 
-The database uses WAL mode for concurrent access — unlimited readers, single writer, with `busy_timeout=5000`. This means Claude can read agent state while agents are actively writing checkpoints.
+The database uses WAL mode for concurrent access — unlimited readers, single writer, with `busy_timeout=5000`.
 
 ### How Coordination Works
 
 ```
 1. Claude creates _codex/state.db and writes the mission row
 2. Claude registers each agent in the agents table (status: pending)
-3. Claude spawns codex-agent processes via `codex-agent start`
-4. Each agent reads the mission table and its own agent row to learn its task
-5. Agent claims file locks (INSERT OR IGNORE) before modifying files
-6. Agent writes checkpoints as it progresses
-7. Agent marks itself completed and releases file locks
-8. Claude polls agent status via `codex-agent jobs --json` + SQLite queries
+3. Claude generates a context block via `codex-agent mission context` for each agent
+4. Claude injects the full context into each agent prompt — agents receive mission state,
+   their own task, peer agents, and pre-loaded file content. Zero DB queries at runtime.
+5. Claude spawns codex-agent processes via `codex-agent start`
+6. Agent claims file locks (INSERT OR IGNORE) before modifying files
+7. Agent writes a single SQLite UPDATE at completion (status, files_modified, summary)
+8. Claude polls agent status via `codex-agent jobs --json`
 9. Once all agents complete, Claude synthesizes results and advances the pipeline
 ```
 
 Key rules:
+- **Pre-injection paradigm** — agents do zero DB queries; all context arrives in the prompt
 - **Agents never write to the `mission` table** — only Claude controls pipeline state
 - **Agents only UPDATE their own row** in the `agents` table — Claude does all INSERTs
 - **File locks use INSERT OR IGNORE** — if a file is already locked, the agent skips it
