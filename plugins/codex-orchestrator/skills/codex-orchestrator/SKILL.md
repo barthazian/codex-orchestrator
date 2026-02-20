@@ -88,6 +88,7 @@ Before codex-agent can run, three things must be installed:
 1. **Bun** — JavaScript runtime (runs the CLI)
 2. **sqlite3** — Database CLI (state bus for coordination)
 3. **OpenAI Codex CLI** — The coding agent being orchestrated
+4. **Git repo in working directory** — Codex CLI refuses to run outside a trusted git repo (`Not inside a trusted directory and --skip-git-repo-check was not specified`). If `.git/` is absent, agents spawn, consume ~46 min of inactivity timeout, and silently produce zero output.
 
 The user must also be **authenticated with OpenAI** (`codex --login`) so agents can make API calls.
 
@@ -95,7 +96,10 @@ The user must also be **authenticated with OpenAI** (`codex --login`) so agents 
 
 ```bash
 codex-agent health    # checks codex is available
+test -d .git && echo "GIT OK" || (git init && echo "GIT INITIALIZED — repo created")
 ```
+
+**MANDATORY:** Always run both checks before spawning any agent. If `.git/` is missing, run `git init` — it is safe, non-destructive, and takes under a second.
 
 ### If Not Installed
 
@@ -160,11 +164,17 @@ USER'S REQUEST
 
 The `--map` flag injects `docs/CODEBASE_MAP.md` into every agent's prompt, giving them instant structural context (file layout, module boundaries, data flows). Note: agents already have task and mission clarity from the state.db pre-injection — the map is not a replacement for that, but a complement that reduces codebase exploration overhead on large projects.
 
-**Auto-create at mission start:** Before entering any pipeline stage, check if `docs/CODEBASE_MAP.md` exists. If it does NOT exist, invoke `/cartographer` to generate it. This is a prerequisite — do NOT spawn agents without a map.
+**Auto-create at mission start:** Before entering any pipeline stage, run both gates:
 
 ```bash
+# Gate 1: Git repo (HARD REQUIREMENT — agents silently fail without this)
+test -d .git && echo "GIT OK" || (git init && echo "GIT INITIALIZED")
+
+# Gate 2: Codebase map
 test -f docs/CODEBASE_MAP.md && echo "MAP EXISTS" || echo "NO MAP — run /cartographer first"
 ```
+
+Do NOT spawn any agent until Gate 1 passes. Gate 2 may be skipped for brand-new projects with no source files yet (cartographer has nothing to map).
 
 **Cartographer fallback (if /cartographer returns empty):** If `/cartographer` produces no output or the map file is missing/empty after invocation, spawn a `general-purpose` agent (NOT Explore — Explore agents are read-only and cannot write files) with explicit instructions to:
 1. Read all source files in the project
