@@ -323,33 +323,36 @@ Each agent returns findings as JSON: `[{path, line, severity, confidence, catego
 
 **IMPORTANT**: Pass the frozen diff scope (Step 1) to each agent. Agents MUST NOT review files outside the scope.
 
-**Step 4: Confidence Scoring**
+**Step 4: Orchestrating Claude Direct Review**
 
-For each issue from Step 3, launch a parallel Haiku agent that scores confidence 0-100:
+With both the Codex findings (Step 2) and all 5 Claude agent findings (Step 3) in hand, the **orchestrating Claude** now reads the actual source files from the frozen diff scope and evaluates every raw finding directly against the code.
 
-| Score | Meaning |
-|-------|---------|
-| 0 | False positive. Does not stand up to scrutiny, or is pre-existing. |
-| 25 | Might be real, but may be false positive. Agent could not verify. |
-| 50 | Real issue, but minor/nitpick. Not important relative to the mission. |
-| 75 | Very likely real. Verified. Important, will impact functionality, or directly mentioned in CLAUDE.md. |
-| 100 | Definitely real. Confirmed. Will happen frequently. Evidence directly confirms. |
+```bash
+# Read each file in the diff scope before evaluating
+# (Use the Read tool on each file in the frozen file list from Step 1)
+```
 
-For CLAUDE.md-flagged issues: the scoring agent MUST double-check that CLAUDE.md actually mentions the concern.
+For each raw finding, Claude makes a first-principles judgment:
 
-**Filter threshold: 80.** Discard all issues scoring below 80.
+| Verdict | Meaning | Action |
+|---------|---------|--------|
+| **KEEP** | Real issue, confirmed by reading the code. The described behaviour actually occurs at the cited line. | Store in `review_findings` |
+| **DISCARD** | False positive, pre-existing, already caught by gate, or pedantic nitpick. | Drop silently |
+| **ELEVATE** | Flagged by both Codex and a Claude agent independently on the same path/line — highest signal. | Store with `confirmed_by_both = 1` |
 
-**False positives to filter** (give this list to review and scoring agents):
+**False positives to discard:**
 - Pre-existing issues not introduced by this mission's agents
-- Issues that linters, typecheckers, or compilers would catch (the gate already caught these)
-- Pedantic nitpicks a senior engineer wouldn't flag
+- Issues linters, typecheckers, or compilers would catch (the gate already caught these)
+- Pedantic nitpicks a senior engineer wouldn't flag in a real review
 - General quality issues unless explicitly required by CLAUDE.md
 - Intentional functionality changes related to the mission
 - Issues on lines not modified by agents
 
+**For CLAUDE.md-flagged issues:** re-read the relevant CLAUDE.md section before keeping — confirm the rule actually applies to the changed code.
+
 **Step 5: Store All Findings in state.db**
 
-After scoring, Claude inserts ALL surviving findings (confidence >= 80) into the `review_findings` table. Use `insertFinding()` from `stateStore.ts`:
+Claude inserts all KEEP and ELEVATE findings into the `review_findings` table. Use `insertFinding()` from `stateStore.ts`:
 
 - Set `agent_id` to the reviewing agent's ID (e.g., `codex-review`, `claude-review-1` through `claude-review-5`)
 - Set `model` to identify the source model (e.g., `codex`, `claude-sonnet`)
@@ -373,7 +376,7 @@ The `confirmed_by_both` count shows cross-model agreement. Write synthesis to `_
 
 - Issues flagged by BOTH Codex and Claude = **HIGH CONFIDENCE** (prioritize these)
 - Issues flagged by Codex only (model contains 'codex')
-- Issues flagged by Claude only (model contains 'claude', scored >= 80)
+- Issues flagged by Claude only (model contains 'claude')
 - Recommended actions
 - Telemetry: total findings, by severity, by status, confirmed_by_both
 
