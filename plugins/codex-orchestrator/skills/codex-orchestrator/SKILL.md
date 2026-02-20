@@ -54,6 +54,7 @@ Claude breaks work into focused, independent tasks and spawns a Codex agent for 
 - Make course corrections via `events` table
 - Synthesize results
 - Run dual-model reviews (Stage 6)
+- Run host build verification after each implementation wave (agents write files; Claude verifies builds — Claude has full network access, agents do not)
 
 **Not Claude's job:**
 - Implementing code directly (agents do this)
@@ -257,7 +258,22 @@ sqlite3 -header -column _codex/state.db "SELECT file_path, agent_id FROM file_lo
 
 If any agents are still running or file locks remain, do NOT advance to review.
 
-**Map Update Gate (after artifact gate passes):** Run `/cartographer` to update the codebase map before review. Implementation agents changed the codebase — review agents need current architecture context.
+**Host Build Verification Gate (after artifact gate passes):** Claude runs the build verification command directly from the host — NOT inside any agent. Agents write files; Claude verifies. This is language-agnostic: Claude reads the project root, detects the build tool, and runs the appropriate command:
+
+```bash
+# Claude detects and runs — examples:
+cargo check          # Rust   (Cargo.toml present)
+tsc --noEmit         # TypeScript (tsconfig.json present)
+go build ./...       # Go     (go.mod present)
+python -m py_compile # Python (*.py present)
+npm run build        # Node   (package.json with build script)
+```
+
+**Why this must run on the host:** `workspace-write` sandbox blocks outbound network. Agents cannot fetch dependencies from crates.io, npm, PyPI, etc. The host has full network access. If build verification is delegated to agents, dependency resolution silently fails and the failure surfaces only after the agent's full turn budget is consumed.
+
+If build verification fails, Claude fixes the issue directly (dependency source, version conflict, syntax error) before advancing to Stage 6. Do NOT spawn a new agent to fix a dependency line.
+
+**Map Update Gate (after build verification passes):** Run `/cartographer` to update the codebase map before review. Implementation agents changed the codebase — review agents need current architecture context.
 
 ### Stage 6: Review (DUAL-MODEL) — Complete Protocol
 
