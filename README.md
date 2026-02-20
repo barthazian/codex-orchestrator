@@ -285,7 +285,7 @@ The review pipeline uses both Codex and Claude models:
 
 1. **Codex review agents** — Spawn focused reviewers for security, correctness, performance
 2. **Claude Sonnet agents** — 5 parallel reviewers with different specializations
-3. **Haiku confidence scoring** — Aggregates findings at confidence threshold 80
+3. **Orchestrating Claude direct review** — Reads the modified source files and evaluates every raw finding first-hand: KEEP, DISCARD, or ELEVATE (cross-model agreement)
 
 See [plugins/codex-orchestrator/README.md](plugins/codex-orchestrator/README.md) for full plugin documentation.
 
