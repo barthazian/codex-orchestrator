@@ -13,7 +13,7 @@
       "name": "codex-orchestrator",
       "source": "./plugins/codex-orchestrator",
       "description": "Orchestrate OpenAI Codex agents from Claude Code. Spawn parallel agents, monitor progress, and capture results via codex exec --json.",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "category": "developer tools",
       "keywords": ["codex", "orchestration", "agents", "parallel", "delegation", "cross-platform"]
     }
