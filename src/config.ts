@@ -3,12 +3,12 @@
 import { homedir } from "os";
 
 export const config = {
-  // Default model
-  model: "gpt-5.3-codex",
+  // Default model — override with CODEX_MODEL env var
+  model: process.env.CODEX_MODEL ?? "gpt-5.3-codex",
 
-  // Reasoning effort levels
+  // Reasoning effort levels — override default with CODEX_REASONING env var
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
-  defaultReasoningEffort: "xhigh" as const,
+  defaultReasoningEffort: (process.env.CODEX_REASONING ?? "xhigh") as "low" | "medium" | "high" | "xhigh",
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
