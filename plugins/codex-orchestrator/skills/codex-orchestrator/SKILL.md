@@ -602,6 +602,8 @@ Every agent prompt MUST include the **Mission Context** and **Task** blocks belo
 
 **CRITICAL: Use file-based prompts to avoid shell quoting issues.** Write the prompt to `_codex/prompt-{agentId}.txt` using the Write tool, then spawn with `codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files"`.
 
+**CRITICAL (Windows/MINGW): Keep prompt files under 4KB.** On Windows, `$(cat prompt.txt)` is expanded by bash before being passed to `codex-agent`, which then sets it as `CODEX_PROMPT` in the environment. Windows has a ~32KB process environment block limit — prompts over ~4KB risk `Argument list too long` (node fails to spawn). **Never embed full code, type definitions, or spec text in prompt files.** Instead: pass the spec document via `-f PLAN.md` (or equivalent) and direct agents to read the relevant sections by name. Keep prompts to: task description, file list, section references, completion command.
+
 **Before writing the prompt file**, Claude MUST:
 
 1. Read the current mission context (single structured command replaces 3 separate SELECT queries):
@@ -814,6 +816,14 @@ codex-agent health               # verify codex available
 | Sandbox | `workspace-write` | Agents can modify files by default |
 
 ## 8. Operational Policies
+
+### Prompt Size Limit (Windows/MINGW) — HARD LIMIT
+
+**Maximum prompt file size: 4KB on Windows.** The `$(cat prompt.txt)` expansion passes the full content through bash → `CODEX_PROMPT` env var → `exec node`. Windows caps the total process environment at ~32KB. Prompts over ~4KB cause `node: Argument list too long` — the codex process fails to spawn instantly with no output.
+
+**Rule:** Prompt files contain ONLY: task description, list of files to create, section references into spec docs, and the completion sqlite3 command. All specifications (code, types, addresses, schemas) live in documents passed via `-f` flags. Agents read those documents themselves.
+
+**Diagnosis:** If all agents fail in under 60 seconds with no JSONL events and stderr shows `Argument list too long`, the prompt is too large. Fix: shorten the prompt, move specs to `-f` files.
 
 ### Sandbox Mode: workspace-write for ALL agents
 
