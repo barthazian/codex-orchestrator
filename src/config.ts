@@ -4,7 +4,7 @@ import { homedir } from "os";
 
 export const config = {
   // Default model — override with CODEX_MODEL env var
-  model: process.env.CODEX_MODEL ?? "gpt-5.3-codex",
+  model: process.env.CODEX_MODEL ?? "gpt-5.3-codex-spark",
 
   // Reasoning effort levels — override default with CODEX_REASONING env var
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
