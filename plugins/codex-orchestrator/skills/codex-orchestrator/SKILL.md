@@ -833,6 +833,27 @@ codex-agent health               # verify codex available
 
 ## 8. Operational Policies
 
+### Per-Stage Model and Reasoning Selection — MANDATORY
+
+Implementation and review agents use DIFFERENT models and reasoning levels. Always pass `-m` and `-r` explicitly when spawning — never rely on the CLI default.
+
+| Stage | Model env var | Reasoning env var | Default values |
+|-------|--------------|-------------------|----------------|
+| Research (2), Implementation (5), Testing (7) | `$CODEX_MODEL` | `$CODEX_REASONING` | `gpt-5.3-codex-spark`, `xhigh` |
+| Review (6) — Codex review agents only | `$CODEX_REVIEW_MODEL` | `$CODEX_REVIEW_REASONING` | `gpt-5.3-codex`, `high` |
+
+**Implementation spawn:**
+```bash
+codex-agent start "$(cat _codex/prompt-{id}.txt)" -m "$CODEX_MODEL" -r "$CODEX_REASONING"
+```
+
+**Review spawn (Stage 6 Codex agents only):**
+```bash
+codex-agent start "$(cat _codex/prompt-{id}.txt)" -m "$CODEX_REVIEW_MODEL" -r "$CODEX_REVIEW_REASONING"
+```
+
+The 5 Claude review agents (Task tool) are not affected — they use Claude's own model, not Codex.
+
 ### Prompt Size Limit (Windows/MINGW) — HARD LIMIT
 
 **Maximum prompt file size: 4KB on Windows.** The `$(cat prompt.txt)` expansion passes the full content through bash → `CODEX_PROMPT` env var → `exec node`. Windows caps the total process environment at ~32KB. Prompts over ~4KB cause `node: Argument list too long` — the codex process fails to spawn instantly with no output.

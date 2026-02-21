@@ -6,9 +6,15 @@ export const config = {
   // Default model — override with CODEX_MODEL env var
   model: process.env.CODEX_MODEL ?? "gpt-5.3-codex-spark",
 
+  // Review stage model — override with CODEX_REVIEW_MODEL env var (falls back to CODEX_MODEL)
+  reviewModel: process.env.CODEX_REVIEW_MODEL ?? process.env.CODEX_MODEL ?? "gpt-5.3-codex-spark",
+
   // Reasoning effort levels — override default with CODEX_REASONING env var
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
   defaultReasoningEffort: (process.env.CODEX_REASONING ?? "xhigh") as "low" | "medium" | "high" | "xhigh",
+
+  // Review stage reasoning — override with CODEX_REVIEW_REASONING env var (falls back to CODEX_REASONING)
+  reviewReasoningEffort: (process.env.CODEX_REVIEW_REASONING ?? process.env.CODEX_REASONING ?? "high") as "low" | "medium" | "high" | "xhigh",
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
