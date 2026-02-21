@@ -692,6 +692,21 @@ codex-agent start "$(cat _codex/prompt-{agentId}.txt)" --map -f "relevant/files/
 
 Claude has already registered the agent and pre-locked files (Step 2 above). No additional post-spawn DB writes needed. Proceed to spawn the next agent or begin monitoring.
 
+After spawning **all** agents for a wave, immediately spawn a background watcher via the Bash tool with `run_in_background: true`:
+
+```bash
+# Run ONCE after all agents are spawned — Bash tool, run_in_background: true
+while true; do
+  PENDING=$(sqlite3 _codex/state.db \
+    "SELECT COUNT(*) FROM agents WHERE status IN ('running','pending');")
+  [ "$PENDING" -eq 0 ] && break
+  sleep 15
+done
+echo "CODEX_AGENTS_DONE"
+```
+
+Claude Code detects when this background process exits and automatically injects a notification into the conversation, waking Claude up without user input. Claude then runs `codex-agent jobs --json` to read outcomes (the watcher does not distinguish success from failure — just that all agents have settled).
+
 After spawning all agents, monitor with:
 
 ```bash
@@ -729,6 +744,7 @@ sqlite3 _codex/state.db "DELETE FROM file_locks WHERE agent_id='{jobId}';"
 8. **For review agents**, omit YOUR FILES section. Add: `Write your findings to _codex/reviews/codex-{focus}.md. Do NOT modify source code.`
 9. **For UI work**, include the production-grade UI constraint. For non-UI work, omit it.
 10. **Claude fills in ONLY the bracketed parts.** `[mission description]`, `[task]`, `[cwd]`, `[jobId]`, `[file1]`, `[file2]`, etc. The structure is fixed.
+11. **Always spawn a background watcher after each agent wave.** Use the Bash tool with `run_in_background: true`. The watcher polls `state.db` every 15s and exits when no agents remain in `running`/`pending` status. This is the only mechanism that notifies Claude when agents complete without requiring user input. Re-spawn after context compaction if agents are still running.
 
 ## 7. CLI Reference & Monitoring
 
@@ -932,6 +948,11 @@ codex-agent mission status --json --dir "{cwd}"
 
 # 3. Reconcile dead agents (auto-marks failed, releases their locks)
 codex-agent mission reconcile --dir "{cwd}"
+
+# 4. Re-spawn background watcher if any agents are still running
+STILL_RUNNING=$(sqlite3 _codex/state.db \
+  "SELECT COUNT(*) FROM agents WHERE status IN ('running','pending');")
+# If STILL_RUNNING > 0, re-spawn the background watcher (Bash tool, run_in_background: true)
 ```
 
 The `mission status --json` command replaces the 4 separate sqlite3 SELECT queries previously needed. The `mission reconcile` command automatically detects agents whose processes died without self-reporting, marks them as failed, and releases their file locks — eliminating the need for manual fallback sqlite3 heredocs.
