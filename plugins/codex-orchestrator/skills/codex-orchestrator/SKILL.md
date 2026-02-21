@@ -821,9 +821,9 @@ codex-agent health               # verify codex available
 
 **Maximum prompt file size: 4KB on Windows.** The `$(cat prompt.txt)` expansion passes the full content through bash → `CODEX_PROMPT` env var → `exec node`. Windows caps the total process environment at ~32KB. Prompts over ~4KB cause `node: Argument list too long` — the codex process fails to spawn instantly with no output.
 
-**Rule:** Prompt files contain ONLY: task description, list of files to create, section references into spec docs, and the completion sqlite3 command. All specifications (code, types, addresses, schemas) live in documents passed via `-f` flags. Agents read those documents themselves.
+**Rule:** Prompt files contain ONLY: task description, list of files to create, section references into spec docs, and the completion sqlite3 command. Do NOT use `-f` flags to inject large spec documents — `codex-agent` reads the file and appends its full content to `CODEX_PROMPT`, making the env var even larger. Instead, instruct agents to read spec files themselves via shell commands (e.g. `Get-Content PLAN.md` on Windows, `cat PLAN.md` on Unix).
 
-**Diagnosis:** If all agents fail in under 60 seconds with no JSONL events and stderr shows `Argument list too long`, the prompt is too large. Fix: shorten the prompt, move specs to `-f` files.
+**Diagnosis:** If all agents fail after 10-20 minutes with no JSONL events and stderr shows `Argument list too long`, a `-f` flag is injecting a large file. Fix: remove the `-f` flag, instruct agents to read the file themselves.
 
 ### Sandbox Mode: workspace-write for ALL agents
 
