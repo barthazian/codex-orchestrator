@@ -1,5 +1,5 @@
 ---
-name: codex-orchestrator
+name: codex-orchestrator-mono
 description: Army model — Claude decomposes tasks and spawns N focused Codex agents directly via codex exec --json. No single-lead bottleneck. Claude manages all coordination via _codex/state.db, makes strategic decisions, and orchestrates dual-model code reviews. Cross-platform (macOS, Linux, Windows). Trigger on ANY task involving code, file modifications, codebase research, multi-step work, or implementation. Only skip if the user explicitly asks you to do something yourself.
 triggers:
   - codex-orchestrator
@@ -445,7 +445,8 @@ CREATE TABLE IF NOT EXISTS mission (
   progress TEXT DEFAULT '',
   blockers TEXT DEFAULT '[]',
   next_steps TEXT DEFAULT '[]',
-  summary TEXT DEFAULT ''
+  summary TEXT DEFAULT '',
+  blackboard_checkpoint_id TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -576,6 +577,46 @@ sqlite3 _codex/state.db "INSERT INTO events (type, source, message, context) VAL
 - What failed previously (avoid repeating mistakes)
 
 If tables grow excessively large (>1000 rows in events), Claude may ask the user for permission to prune old entries — but NEVER autonomously.
+
+### Blackboard Checkpoint Protocol (Cross-Session Durability)
+
+At every stage gate, Claude writes a checkpoint to memoryd. This survives `/compact` and `/clear` — `memory_bootstrap` restores stage context instantly at session start without requiring filesystem reads.
+
+**When to write:** after mission init (ideation), synthesis→PRD, PRD approval→implement, artifact gate→review, review→test, test→done. Write immediately after the corresponding `UPDATE mission SET stage=...`.
+
+**Step 1 — Create new checkpoint** (via `memory_remember_candidate` MCP tool):
+
+```
+tier:       "blackboard"
+scope:      "project"
+project_id: "{detected_project_id}"   # from memory_detect_project
+agent_id:   "claude_code"
+title:      "codex-mission-checkpoint:{project_id}"
+type:       "mission_checkpoint"
+content:    JSON string containing:
+              stage, mission_description, completed_agents (id+task+files_modified+summary),
+              key_decisions (from events table), next_steps
+```
+
+Note the returned `memory_id` as `{new_id}`.
+
+**Step 2 — Supersede old checkpoint** (if `blackboard_checkpoint_id` is not NULL in mission table):
+
+```bash
+# {new_id} goes in the PATH (the superseder — stays active)
+# {old_id} goes in the BODY superseded_id (gets deprecated/removed from retrieval)
+curl -s -X POST http://127.0.0.1:8080/memory/items/{new_id}/supersede \
+  -H "Content-Type: application/json" \
+  -d '{"superseded_id": "{old_id}", "provenance": {"sources": ["codex-orchestrator"]}}'
+```
+
+**Step 3 — Store new id in state.db:**
+
+```bash
+sqlite3 _codex/state.db "UPDATE mission SET blackboard_checkpoint_id='{new_id}' WHERE id=1;"
+```
+
+**Recovery** (after `/compact`, `/clear`, or fresh session): `memory_bootstrap` automatically returns the active checkpoint. Read `stage` and `content` from it to know where the mission is before touching the filesystem. The supersede chain ensures only the current checkpoint is returned — stale ones are marked deprecated.
 
 ### Initialization
 
@@ -961,6 +1002,11 @@ Claude decides per-agent based on task complexity. Default to ephemeral unless t
 After Claude's context compacts, immediately recover state with:
 
 ```bash
+# 0. Restore stage context from memoryd (fast — before any filesystem reads)
+#    Call memory_bootstrap(query="codex mission checkpoint {project_id}", tiers=["blackboard"], agent_id="claude_code")
+#    Read stage + mission_description + completed_agents from the returned checkpoint content.
+#    This tells you what stage you're in before touching state.db.
+
 # 1. Live agent processes
 codex-agent jobs --json
 
